@@ -419,6 +419,480 @@ class APLoss(torch.autograd.Function):
         return g1*out_grad1, None, None
 
 
+class ComputeLossWithAttr:
+    # Compute losses
+    def __init__(self, model, autobalance=False):
+        super(ComputeLossWithAttr, self).__init__()
+        # 获取模型所在gpu号
+        device = next(model.parameters()).device  # get model device
+        # 获取超参数
+        h = model.hyp  # hyperparameters
+
+        # 定义 loss 函数
+        self.BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['cls_pw']], device=device))
+        self.BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['obj_pw']], device=device))
+        self.BCEsubCls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['subCls_pw']], device=device))
+        self.BCEattrObj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([h['attrObj_pw']], device=device))
+
+        # 标签平滑（减少误标注带来的影响）
+        self.cp, self.cn = smooth_BCE(eps=h.get('label_smoothing', 0.0))  # positive, negative BCE targets
+
+        # 是否使用 focal loss
+        g = h['fl_gamma']  # focal loss gamma
+        if g > 0:
+            self.BCEcls, self.BCEobj = FocalLoss(self.BCEcls, g), FocalLoss(self.BCEobj, g)
+
+        det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
+        self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.06, .02])  # P3-P7
+        #self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.25, 0.1, .05])  # P3-P7
+        #self.balance = {3: [4.0, 1.0, 0.4]}.get(det.nl, [4.0, 1.0, 0.5, 0.4, .1])  # P3-P7
+        self.ssi = list(det.stride).index(16) if autobalance else 0  # stride 16 index
+        self.gr, self.hyp, self.autobalance = model.gr, h, autobalance
+        for k in 'na', 'nc', 'nl', 'anchors':
+            setattr(self, k, getattr(det, k))
+
+    def __call__(self, three_head_preds_mat, batch_all_targets):  # predictions, targets, model
+        # three_head_preds 是网络的预测输出，是一个长度为 3 的list，单个元素尺寸为：
+        # （
+        # batch_size, 
+        # anchor_num, 
+        # feature_map_w, 
+        # feature_map_h, 
+        # [ # 以下为内容
+        # x(0), y(1), w(2), h(3), obj(4), cls_one_hot(5~14),
+        # 车辆类别（15、16、17),
+        # 左车灯是否可见（18），左车灯状态（19、20），左车灯位置（21～24），
+        # 右车灯是否可见（25），右车灯状态（26、27），右车灯位置（28～31），
+        # 车屁股是否可见（32），车屁股框位置（33～36）
+        # 车头是否可见（37），车头框位置（38～41）
+        # 车牌是否可见（42），车牌位置（43～46），
+        # 人的类别（47，48），人的状态（49、50）， 是否带头盔（51、52）
+        # 人头是否可见（53），人头的位置（54～57），
+        # 人骑的车是否可见（58），人骑的车的位置（59～62）
+        # 电动车车牌是否可见（63），车牌的位置（64～67），
+        # 红绿灯的颜色（68,69,70），
+        # 路牌的颜色（71,72），
+        # 公交车道第一个点坐标（2），公交车道第二个点坐标（2），公交车道第三个点坐标（2），公交车道第四个点坐标（2），
+        # 斑马线第一个点坐标（2），斑马线第二个点坐标（2），斑马线第三个点坐标（2），斑马线第四个点坐标（2），
+        # 网格线第一个点坐标（2），网格线第二个点坐标（2），网格线第三个点坐标（2），网格线第四个点坐标（2），
+        # 导流线第一个点坐标（2），导流线第二个点坐标（2），导流线第三个点坐标（2），导流线第四个点坐标（2）
+        # ]
+        # ）
+
+        # batch_all_targets 是数据增强后所有的标注框 bbox，尺寸为：
+        #（
+        # bbox_num, 
+        # [
+        # img_index(0), cls_index(1), x(2), y(3), w(4), h(5), 
+        # 车辆类别（6），
+        # 左车灯是否可见（7），左车灯状态（8），左车灯位置（9~12），
+        # 右车灯是否可见（13），右车灯状态（14），右车灯位置（15~18），
+        # 车屁股是否可见（19），车屁股框位置（20~23）
+        # 车头是否可见（24），车头框位置（25~28）
+        # 车牌是否可见（29），车牌位置（30~33），
+        # 人的类别（34），人的状态（35）， 是否带头盔（36）
+        # 人头是否可见（37），人头的位置（38~41），
+        # 人骑的车是否可见（42），人骑的车的位置（43~46）
+        # 电动车车牌是否可见（47），车牌的位置（48~51），
+        # 红绿灯的颜色（52），
+        # 路牌的颜色（53），
+        # 公交车道第一个点坐标（2），公交车道第二个点坐标（2），公交车道第三个点坐标（2），公交车道第四个点坐标（2），
+        # 斑马线第一个点坐标（2），斑马线第二个点坐标（2），斑马线第三个点坐标（2），斑马线第四个点坐标（2），
+        # 网格线第一个点坐标（2），网格线第二个点坐标（2），网格线第三个点坐标（2），网格线第四个点坐标（2），
+        # 导流线第一个点坐标（2），导流线第二个点坐标（2），导流线第三个点坐标（2），导流线第四个点坐标（2）
+        # ]
+        # ）
+        
+        # 获取设备号
+        device = batch_all_targets.device
+
+        # 获取所有正样本的各种对应信息
+        total_positive_classes, total_positive_bboxes, total_positive_indices, total_positive_anchors, total_positive_targets = self.build_targets(three_head_preds_mat, batch_all_targets)  # targets
+
+        # 三种 loss 进行初始化
+        loss_class, loss_box_position, loss_objection = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
+        loss_attr_objection = torch.zeros(1, device=device)
+        loss_sub_class = torch.zeros(1, device=device)
+        loss_attr_position = torch.zeros(1, device=device)
+
+        # 遍历网络输出的三个 head
+        for head_index, curr_head_preds_mat in enumerate(three_head_preds_mat): 
+            
+            # 所有正样本对应的索引：图像 id、合适的anchor索引、y 方向偏移到的格子的索引、x 方向偏移到的格子的索引
+            curr_head_targets_imgIds, curr_head_targets_anchor_indices, curr_head_targets_y_offsets_grids_indices, curr_head_targets_x_offsets_grids_indices = total_positive_indices[head_index]  
+
+            # 初始化一个 objection 值的多维矩阵,先全部置0,然后存在匹配的情况就计算那个位置的 obj，未匹配到的仍然是 0
+            # 这里注意 curr_head_obj_mat 是被都初始化为 0 的，也就是所有的网格默认为背景（负样本）
+            curr_head_obj_mat = torch.zeros_like(curr_head_preds_mat[..., 0], device=device)  
+            # 尺寸是:(batch_size, anchor_num, feature_map_w, feature_map_h)
+
+            bbox_num = curr_head_targets_imgIds.shape[0]  
+            # 没有标注框的背景不需要计算 loss
+            if bbox_num > 0:
+                # 获取所有的正样本预测
+                # 取出第 curr_head_targets_imgIds 张图中的
+                #    第 curr_head_targets_y_offsets_grids_indices 行
+                #    第 curr_head_targets_x_offsets_grids_indices 行
+                #    第 curr_head_targets_anchor_indices 个 anchor 框对应的预测框
+                # 然后排列成 (3*bbox, 6) 的形状,与正样本的排序是对应的，即相同的索引对应匹配预测框和标签框
+                curr_head_pred_positive = curr_head_preds_mat[curr_head_targets_imgIds, curr_head_targets_anchor_indices, curr_head_targets_y_offsets_grids_indices, curr_head_targets_x_offsets_grids_indices] 
+
+                # 获取所有对应的正样本
+                # 然后排列成 (3*bbox, 7)
+                curr_head_targets = total_positive_targets[head_index]
+                curr_head_targets_classes = total_positive_classes[head_index]
+
+                #------------------ 进行目标检测框位置回归 ------------------------------
+                # 这里需要和推理时候的位置编码一致,以便从特征图尺度放缩回正常尺寸
+                # 获取当前 head 所有匹配到预测框的 xy、wh
+                curr_head_pred_positive_xy = curr_head_pred_positive[:, :2].sigmoid() * 2. - 0.5
+                curr_head_pred_positive_wh = (curr_head_pred_positive[:, 2:4].sigmoid() * 2) ** 2 * total_positive_anchors[head_index]
+                # curr_head_pred_positive_xy 尺寸为: (3*bbox, 2)
+
+                # 把 xywh 合并到一起
+                curr_head_pred_positive_boxes = torch.cat((curr_head_pred_positive_xy, curr_head_pred_positive_wh), 1) 
+                # curr_head_pred_positive_box 尺寸为: (3*bbox, 4)
+
+                # 计算当前 head 的所有预测框和标注框的 Ciou 值矩阵
+                curr_head_pred_positive_iou = bbox_iou(curr_head_pred_positive_boxes.T, total_positive_bboxes[head_index], x1y1x2y2=False, CIoU=True)  
+
+                # 把所有的 CIOU 值取平均作为当前 head 当前 batch 的位置 loss
+                loss_box_position += (1.0 - curr_head_pred_positive_iou).mean()  
+
+                #------------------ 进行目标检测类别分类----------------------------------
+                # 根据标签平滑的正负样本值 self.cn 和 self.cp，得到标签框的 one-hot 类别向量
+                # 先初始化填充类负样本的值 self.cn
+                curr_head_bbox_cls_onehot = torch.full_like(curr_head_pred_positive[:, 5 : 5 + self.nc - 1], self.cn, device=device)  # targets
+                # 再给正样本的位置赋值 self.cp
+                curr_head_bbox_cls_onehot[range(bbox_num), curr_head_targets_classes] = self.cp
+                # 计算类别 loss
+                loss_class += self.BCEcls(curr_head_pred_positive[:, 5 : 5 + self.nc - 1], curr_head_bbox_cls_onehot) 
+
+                # 遍历所有标注框（包括偏移的，bbox_num 是正常的 3 倍）
+                curr_head_loss_sub_class = 0
+                curr_head_loss_attr_objection = 0
+                curr_head_loss_attr_position = 0
+                for bbox_index in range(bbox_num):
+                    # 获取当前遍历的标注框的类别
+                    gt_box_cls = curr_head_targets_classes[bbox_index]
+
+                    # 如果类别等于汽车
+                    if(gt_box_cls == 0):
+                        # ---------- 进行车辆的 左车灯是否可见|右车灯是否可见|车屁股是否可见|车头是否可见|车牌是否可见 属性回归
+                        curr_head_loss_attr_objection += self.BCEattrObj(curr_head_pred_positive[bbox_index, [18, 25, 32, 37, 42]], curr_head_targets[bbox_index, [7, 13, 19, 24, 29]])
+
+                        # ----------- 进行车辆子类别分类 -----------------------
+                        curr_head_bbox_subclass_onehot = torch.full_like(curr_head_pred_positive[bbox_index, [15, 16, 17]], self.cn, device=device)
+                        curr_bbox_car_subclass = int(curr_head_targets[bbox_index, 6].item())
+                        curr_head_bbox_subclass_onehot[curr_bbox_car_subclass] = self.cp
+                        curr_head_loss_sub_class += self.BCEsubCls(curr_head_pred_positive[bbox_index, [15, 16, 17]], curr_head_bbox_subclass_onehot)
+
+                        if(curr_head_targets[bbox_index, 7] == 1):
+                            #------------ 如果左车灯可见，继续进行左车灯状态分类 --------------------------
+                            curr_head_bbox_subclass_onehot = torch.full_like(curr_head_pred_positive[bbox_index, [19, 20]], self.cn, device=device)
+                            curr_car_leftlight_subclass = int(curr_head_targets[bbox_index, 8].item())
+                            curr_head_bbox_subclass_onehot[curr_car_leftlight_subclass] = self.cp
+                            curr_head_loss_sub_class += self.BCEsubCls(curr_head_pred_positive[bbox_index, [19, 20]], curr_head_bbox_subclass_onehot)
+
+                            # ----------- 如果左车灯可见，继续进行左车灯位置回归 --------------------------
+                            curr_head_pred_positive_leftlight_boxes = curr_head_pred_positive[bbox_index, 21:25].sigmoid()
+                            curr_head_bbox_leftlight_boxes = curr_head_targets[bbox_index, 9:13]
+                            curr_head_pred_positive_attr_iou = bbox_iou(curr_head_pred_positive_leftlight_boxes.T, curr_head_bbox_leftlight_boxes, x1y1x2y2=False, CIoU=True)
+                            curr_head_loss_attr_position += (1.0 - curr_head_pred_positive_attr_iou).mean() 
+
+                        if(curr_head_targets[bbox_index, 13] == 1):
+                            #------------ 如果右车灯可见，继续进行右车灯状态分类 --------------------------
+                            curr_head_bbox_subclass_onehot = torch.full_like(curr_head_pred_positive[bbox_index, [26, 27]], self.cn, device=device)
+                            curr_car_rightlight_subclass = int(curr_head_targets[bbox_index, 14].item())
+                            curr_head_bbox_subclass_onehot[curr_car_rightlight_subclass] = self.cp
+                            curr_head_loss_sub_class += self.BCEsubCls(curr_head_pred_positive[bbox_index, [26, 27]], curr_head_bbox_subclass_onehot)
+
+                            # ----------- 如果右车灯可见，继续进行右车灯位置回归 --------------------------
+                            curr_head_pred_positive_rightlight_boxes = curr_head_pred_positive[bbox_index, 28:32].sigmoid()
+                            curr_head_bbox_rightlight_boxes = curr_head_targets[bbox_index, 15:19]
+                            curr_head_pred_positive_attr_iou = bbox_iou(curr_head_pred_positive_rightlight_boxes.T, curr_head_bbox_rightlight_boxes, x1y1x2y2=False, CIoU=True)
+                            curr_head_loss_attr_position += (1.0 - curr_head_pred_positive_attr_iou).mean() 
+
+                        if(curr_head_targets[bbox_index, 19] == 1):
+                            # ----------- 如果车屁股可见，继续进行车屁股位置回归 --------------------------
+                            curr_head_pred_positive_carbutt_boxes = curr_head_pred_positive[bbox_index, 33:37].sigmoid()
+                            curr_head_bbox_carbutt_boxes = curr_head_targets[bbox_index, 20:24]
+                            curr_head_pred_positive_attr_iou = bbox_iou(curr_head_pred_positive_carbutt_boxes.T, curr_head_bbox_carbutt_boxes, x1y1x2y2=False, CIoU=True)
+                            curr_head_loss_attr_position += (1.0 - curr_head_pred_positive_attr_iou).mean() 
+
+                        if(curr_head_targets[bbox_index, 24] == 1):
+                            # ----------- 如果车头可见，继续进行车头位置回归 --------------------------
+                            curr_head_pred_positive_carhead_boxes = curr_head_pred_positive[bbox_index, 38:42].sigmoid()
+                            curr_head_bbox_carhead_boxes = curr_head_targets[bbox_index, 25:29]
+                            curr_head_pred_positive_attr_iou = bbox_iou(curr_head_pred_positive_carhead_boxes.T, curr_head_bbox_carhead_boxes, x1y1x2y2=False, CIoU=True)
+                            curr_head_loss_attr_position += (1.0 - curr_head_pred_positive_attr_iou).mean()
+
+                        if(curr_head_targets[bbox_index, 29] == 1):
+                            # ----------- 如果车牌可见，继续进行车牌位置回归 --------------------------
+                            curr_head_pred_positive_plate_boxes = curr_head_pred_positive[bbox_index, 43:47].sigmoid()
+                            curr_head_bbox_plate_boxes = curr_head_targets[bbox_index, 30:34]
+                            curr_head_pred_positive_attr_iou = bbox_iou(curr_head_pred_positive_plate_boxes.T, curr_head_bbox_plate_boxes, x1y1x2y2=False, CIoU=True)
+                            curr_head_loss_attr_position += (1.0 - curr_head_pred_positive_attr_iou).mean()
+
+                    if(gt_box_cls == 1):
+                        # ------- 进行行人的 人头是否可见、人骑的车是否可见、头盔是否可见、骑的车的车牌 属性回归
+                        curr_head_loss_attr_objection += self.BCEattrObj(curr_head_pred_positive[bbox_index, [53,58,63]], curr_head_targets[bbox_index, [37,42,47]])
+
+                        # --------- 进行行人类别、人的状态、是否带头盔分类 ---------------
+                        curr_head_bbox_subclass_onehot = torch.full_like(curr_head_pred_positive[bbox_index, 47:53], self.cn, device=device)
+                        curr_person_type_subclass = int(curr_head_targets[bbox_index, 34].item())
+                        curr_person_state_subclass = int(curr_head_targets[bbox_index, 35].item())
+                        curr_person_helmet_subclass = int(curr_head_targets[bbox_index, 36].item())
+                        curr_head_bbox_subclass_onehot[curr_person_type_subclass] = self.cp
+                        curr_head_bbox_subclass_onehot[2 + curr_person_state_subclass] = self.cp
+                        curr_head_bbox_subclass_onehot[4 + curr_person_helmet_subclass] = self.cp
+                        curr_head_loss_sub_class += self.BCEsubCls(curr_head_pred_positive[bbox_index, 47:53], curr_head_bbox_subclass_onehot)
+
+                        if(curr_head_targets[bbox_index, 42] == 1):
+                            # ----------- 如果骑的车可见，继续进行电动车的位置回归 --------------------------
+                            curr_head_pred_positive_motor_boxes = curr_head_pred_positive[bbox_index, 59:63].sigmoid()
+                            curr_head_bbox_motor_boxes = curr_head_targets[bbox_index, 43:47]
+                            curr_head_pred_positive_attr_iou = bbox_iou(curr_head_pred_positive_motor_boxes.T, curr_head_bbox_motor_boxes, x1y1x2y2=False, CIoU=True)
+                            curr_head_loss_attr_position += (1.0 - curr_head_pred_positive_attr_iou).mean() 
+
+                        if(curr_head_targets[bbox_index, 47] == 1):
+                            # ----------- 如果电动车车牌可见，继续进行电动车车牌位置回归 --------------------------
+                            curr_head_pred_positive_motorplate_boxes = curr_head_pred_positive[bbox_index, 64:68].sigmoid()
+                            curr_head_bbox_motorplate_boxes = curr_head_targets[bbox_index, 48:52]
+                            curr_head_pred_positive_attr_iou = bbox_iou(curr_head_pred_positive_motorplate_boxes.T, curr_head_bbox_motorplate_boxes, x1y1x2y2=False, CIoU=True)
+                            curr_head_loss_attr_position += (1.0 - curr_head_pred_positive_attr_iou).mean()
+
+                    if(gt_box_cls == 3):
+                        # -------------- 进行红绿灯属性分类 -------------------
+                        curr_head_bbox_subclass_onehot = torch.full_like(curr_head_pred_positive[bbox_index, [68, 69, 70]], self.cn, device=device)
+                        curr_trafficlight_subclass = int(curr_head_targets[bbox_index, 52].item())
+                        curr_head_bbox_subclass_onehot[curr_trafficlight_subclass] = self.cp
+                        curr_head_loss_sub_class += self.BCEsubCls(curr_head_pred_positive[bbox_index, [68, 69, 70]], curr_head_bbox_subclass_onehot)
+
+                    if(gt_box_cls == 5):
+                        # -------------- 进行路牌属性分类 -------------------
+                        curr_head_bbox_subclass_onehot = torch.full_like(curr_head_pred_positive[bbox_index, [71,72]], self.cn, device=device)
+                        curr_sign_subclass = int(curr_head_targets[bbox_index, 53].item())
+                        curr_head_bbox_subclass_onehot[curr_sign_subclass] = self.cp
+                        curr_head_loss_sub_class += self.BCEsubCls(curr_head_pred_positive[bbox_index, [71,72]], curr_head_bbox_subclass_onehot)
+                    
+                    #if(gt_box_cls in [6, 7, 8, 9]):
+                        # ------------- 进行各种不规则检测体的四顶点回归 -------------------
+                
+                # 这里记得除以遍历的 bbox 数量
+                curr_head_loss_sub_class /= bbox_num
+                curr_head_loss_attr_objection /= bbox_num
+                curr_head_loss_attr_position /= bbox_num
+
+                # 这里累积三个 head 的 sub_class_loss
+                loss_sub_class += curr_head_loss_sub_class
+                loss_attr_objection += curr_head_loss_attr_objection
+                loss_attr_position += curr_head_loss_attr_position
+
+                #------------------- 进行目标检测置信度回归 ------------------------------
+                # 使用某个网格的某个anchor的预测框和标注框的（使用self.gr修正过） ciou 的值
+                # 来表征该 anchor 的真实 Objectness，从而优化网络输出的 objectness 值，
+                # 值得注意的是，由于 ciou 的计算与输出的 xywh 有关，为了避免反向传播影响网络输出 xywh 值，
+                # 需要在 curr_head_pred_positive_iou 后增加 detach() 操作，让它从计算图中脱离，跟它相关的
+                # 的 xywh 都不会在 objcetness loss 的反向传播中得到影响
+                curr_head_obj_mat[curr_head_targets_imgIds, \
+                                    curr_head_targets_anchor_indices, \
+                                    curr_head_targets_y_offsets_grids_indices, \
+                                    curr_head_targets_x_offsets_grids_indices] \
+                = (1.0 - self.gr) + self.gr * curr_head_pred_positive_iou.detach().clamp(0).type(curr_head_obj_mat.dtype)  
+
+            # 通过所有预测框的 objectness 值和真实标注框通过 iou 计算出的 objectness 值计算 obj_loss
+            curr_head_obj_loss_mat = self.BCEobj(curr_head_preds_mat[..., 4], curr_head_obj_mat)
+            # 三个头的 objectness 需要加权重后相加
+            loss_objection += curr_head_obj_loss_mat * self.balance[head_index]  # obj loss
+
+            # ???
+            if self.autobalance:
+                self.balance[head_index] = self.balance[head_index] * 0.9999 + 0.0001 / curr_head_obj_loss_mat.detach().item()
+
+        # ???
+        if self.autobalance:
+            self.balance = [x / self.balance[self.ssi] for x in self.balance]
+
+        # 三个 loss 分别乘上自己的权重后相加就是最后的总的 loss
+        loss_box_position *= self.hyp['box']
+        loss_objection *= self.hyp['obj']
+        loss_class *= self.hyp['cls']
+        loss_attr_objection *= self.hyp['attr_obj']
+        loss_sub_class *= self.hyp['sub_cls']
+        loss_attr_position *= self.hyp['attr_box']
+        loss = loss_box_position + loss_objection + loss_class + loss_attr_objection + loss_sub_class + loss_attr_position
+
+        # 总的 loss 要乘上 batchs_size
+        batch_size = curr_head_obj_mat.shape[0]  
+
+        return loss * batch_size, torch.cat((loss_box_position, loss_objection, loss_class, loss_attr_objection, loss_sub_class, loss_attr_position)).detach()
+
+    def build_targets(self, p, targets):
+        # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
+        # p 是网络的预测输出，是一个长度为 3 的list，里面每个元素的尺寸为：（batch_size, anchor_num, feature_map_w, feature_map_h, [x y w h obj cls_one_hot]）
+        # targets 是数据增强后所有的 bbox，尺寸为：（bbox_num, 
+        #                                       [img_index cls_index x y w h 
+        #                                       车辆类别（3），左车灯是否可见（1），左车灯状态（2），左车灯位置（4），
+        #                                       右车灯是否可见（1），右车灯状态（2），右车灯位置（4），
+        #                                       车屁股是否可见（1），车屁股框位置（4）
+        #                                       车头是否可见（1），车头框位置（4）
+        #                                       车牌是否可见（1），车牌位置（4），
+        #                                       人的类别（2），人的状态（2）， 是否带头盔（2）
+        #                                       人头是否可见（1），人头的位置（4），
+        #                                       人骑的车是否可见（1），人骑的车的位置（4）
+        #                                       电动车车牌是否可见（1），车牌的位置（4），
+        #                                       红绿灯的颜色（3），
+        #                                       路牌的颜色（2），
+        #                                       公交车道第一个点坐标（2），公交车道第二个点坐标（2），公交车道第三个点坐标（2），公交车道第四个点坐标（2），
+        #                                       斑马线第一个点坐标（2），斑马线第二个点坐标（2），斑马线第三个点坐标（2），斑马线第四个点坐标（2），
+        #                                       网格线第一个点坐标（2），网格线第二个点坐标（2），网格线第三个点坐标（2），网格线第四个点坐标（2），
+        #                                       导流线第一个点坐标（2），导流线第二个点坐标（2），导流线第三个点坐标（2），导流线第四个点坐标（2）
+        #                                       ]）
+        # 注意：里面的 x、y 都是归一化之后的值，指占图像长度/宽度的比例
+
+        # 单个 head 的 anchor 的个数
+        num_anchor = self.na
+
+        # 当前图片中所有标签框的个数
+        bbox_num = targets.shape[0]
+
+        # 使用缩放系数将标签中的原图尺度转换到特征图尺度
+        # 这里的 87 个位置是为了与 targets[:,:,87] 这个相乘，用来进行广播
+        # 87 个位置的的 2：6 是尺寸信息，需要缩放，其他的都置 1 表示不变
+        curr_head_feature_map_size = torch.ones(87, device=targets.device).long()  
+
+        # 和当前图片中所有标签框的个数一样多的anchor索引值
+        # 0 0 0 0 0 0 ........ 0 0 0 ...(列数是 bbox_num)
+        # 1 1 1 1 1 1 ........ 1 1 1 ...
+        # 2 2 2 2 2 2 ........ 2 2 2 ...
+        # 尺寸是（anchor_num bbox_num）
+        anchors_indices = torch.arange(num_anchor, device=targets.device).float().view(num_anchor, 1).repeat(1, bbox_num) 
+        
+        # targets 的 shape 从（bbox_num, [img_index cls_index x y w h]）
+        #                变成（anchor_num, bbox_num, [img_index cls_index x y w h anchor_index]）
+        targets = torch.cat((targets.repeat(num_anchor, 1, 1), anchors_indices[:, :, None]), 2)  # append anchor indices
+
+        # 偏移系数
+        abs_offset = 0.5  
+        # 偏移量
+        offset = torch.tensor([[0, 0],
+                            [1, 0], [0, 1], [-1, 0], [0, -1],  
+                            # [1, 1], [1, -1], [-1, 1], [-1, -1], 
+                            ], device=targets.device).float() * abs_offset
+
+        total_positive_classes, total_positive_bboxes, total_positive_indices, total_positive_anchors, total_positive_targets = [], [], [], [], []
+
+        # 遍历三个检测头
+        for head_index in range(self.nl):
+            # 获取当前 head 的三个 anchor，这里的 anchors 都是缩放到当前特征图尺度过的
+            anchors = self.anchors[head_index]
+            # anchors 尺寸：(3,2)
+
+            # 获取当前 head 的 feature_map 尺寸（缩放系数),用来将 targets 进行缩放到当前尺度
+            curr_head_feature_map_size[2:6] = torch.tensor(p[head_index].shape)[[3, 2, 3, 2]]
+            # curr_head_feature_map_size 尺寸：（1, 1,feature_map_w,feature_map_h,feature_map_w,feature_map_h,1）
+
+            # 标注框在特征图上坐标 = 标注框归一化之后的坐标 × 特征图的尺寸（缩放系数）
+            curr_head_targets = targets * curr_head_feature_map_size
+            # curr_head_targets 尺寸为：（anchor_num, bbox_num, [img_index cls_index x y w h anchor_index]）
+
+            # 如果当前图片有目标框,则不是背景图片
+            if bbox_num > 0:
+
+                # 第一遍筛选：高宽比筛选
+                # 计算每个标注框和三个anchor的高宽比
+                # curr_head_targets[:, :, 4:6] 尺寸是 （anchor_num bbox_num 2）
+                # anchors[:, None] 尺寸是（anchor_num 1 2）
+                # 两者进行广播操作，得到当前 head 的所有的标注框分别与三个 anchor 的高宽比
+                target_anchor_wh_ratio = curr_head_targets[:, :, 4:6] / anchors[:, None] 
+                # target_anchor_wh_ratio 尺寸:（anchor_num bbox_num [w_ratio h_ratio]）
+
+                # 这里指每个标注框和三个anchor的高宽比是否小于阈值（例如 4）的 mask
+                # 含义是某个标注框尺寸不能比 anchor 框大于 4 倍或者小于 1 / 4
+                target_anchor_wh_ratio_mask = torch.max(target_anchor_wh_ratio, 1. / target_anchor_wh_ratio).max(2)[0] < self.hyp['anchor_t']  # compare
+                # target_anchor_wh_ratio_mask 尺寸:（anchor_num bbox_num 1）
+
+                # 进行过滤操作，把不符合的 anchor 行都去掉，最后地一个 anchor_num 维度消失
+                curr_head_targets = curr_head_targets[target_anchor_wh_ratio_mask]  # filter
+                # curr_head_targets 尺寸：（bbox_num, [img_index cls_index x y w h anchor_index]）
+
+                # 第二遍筛选，进行偏移，不仅使用目标中心点所在网格预测目标，还是用距离目标中心最近的两个方格
+                # 当前 head 下所有标注框在特征图尺度下的坐标 xy
+                curr_head_targets_xy = curr_head_targets[:, 2:4]  
+                # curr_head_targets_xy 尺寸为：(bbox_num, [x y])
+
+                # 当前 head 下所有标注框在特征图尺度下的反向坐标 
+                curr_head_targets_inverse_xy = curr_head_feature_map_size[[2, 3]] - curr_head_targets_xy 
+                # curr_head_targets_inverse_xy 尺寸为：(bbox_num, [invers_x inverse_y])
+
+                # 距离当前格子左上角较近的中心点，并且不是位于边缘格子内的标注框的 mask
+                # 分别获取到 x 是否靠近左上角 mask，y 是否靠近左上角 mask
+                x_leftup_mask, y_leftup_mask = ((curr_head_targets_xy % 1. < abs_offset) & (curr_head_targets_xy > 1.)).T
+                # x_leftup_mask、y_leftup_mask 的尺寸：(bbox_num, 1)
+
+                # 距离当前格子右下角较近的中心点，并且不是位于边缘格子内的标注框的 mask
+                x_rightbottom_mask, y_rightbottom_mask = ((curr_head_targets_inverse_xy % 1. < abs_offset) & (curr_head_targets_inverse_xy > 1.)).T
+                # x_rightbottom_mask、y_rightbottom_mask 的尺寸：(bbox_num, 1)
+
+                # 用来过滤每个标注框靠近是否靠近5个方向的 mask，“torch.ones_like(x_leftup_mask)” 代表不偏移
+                all_direction_mask = torch.stack((torch.ones_like(x_leftup_mask), x_leftup_mask, y_leftup_mask, x_rightbottom_mask, y_rightbottom_mask))
+                # all_direction_mask 的尺寸为: (5, bbox_num)
+
+                # 将所有标注框复制五份，使用 all_direction_mask 来过滤
+                # 过滤出靠近不同方向的标注框,找出最接近的两个网格，还有自己本网格，一共三个有效网格
+                # curr_head_targets.repeat((5, 1, 1)) 尺寸为：(5, bbox_num, 7)
+                # 这里注意，标注框还未进行偏移，有三分之二的重复框
+                curr_head_targets = curr_head_targets.repeat((5, 1, 1))[all_direction_mask]
+                # curr_head_targets尺寸为: (3*bbox_num, 7)
+
+                # 生成有效的偏移矩阵，一共三个方向
+                offsets = (torch.zeros_like(curr_head_targets_xy)[None] + offset[:, None])[all_direction_mask]
+                # offsets 尺寸为：(3*bbox_num, 2)
+            
+            # 如果当前图片没有目标框，是背景
+            else:
+                curr_head_targets = targets[0]
+                offsets = 0
+
+            # 获取当前 head 所有标签对应的图片索引和类别
+            curr_head_targets_imgIds, curr_head_targets_classes = curr_head_targets[:, :2].long().T 
+            # curr_head_targets_imgIds 尺寸为：（1, bbox_num）
+            
+            # 获取当前 head 所有标注框在特征图尺度下的坐标 
+            curr_head_targets_xy = curr_head_targets[:, 2:4]
+            # curr_head_targets_xy 尺寸:(3*bbox_num, 2)
+
+            # 获取当前 head 所有标注框在特征图尺度下的长宽
+            curr_head_targets_wh = curr_head_targets[:, 4:6]  
+            # curr_head_targets_wh 尺寸:(3*bbox_num, 2)
+
+            # 把当前 head 所有标注框在三个有效方向上进行真正的偏移，得到偏移后的三倍数量的标注框
+            # curr_head_targets_xy - offsets 得到偏移后格子坐标，long（）取整数得到可以预测正样本的格子的整数索引号
+            curr_head_targets_offsets_grids_indices = (curr_head_targets_xy - offsets).long()
+            # 分成 x y 方向的偏移到的网格索引值
+            curr_head_targets_x_offsets_grids_indices, curr_head_targets_y_offsets_grids_indices = curr_head_targets_offsets_grids_indices.T  # grid xy indices
+            # curr_head_targets_x_offsets_grids_indices 尺寸:(3*bbox_num, 1)
+
+            # 获取当前 head 所有标注框在第一步筛选后匹配到的 anchor 序号
+            curr_head_targets_anchor_indices = curr_head_targets[:, 6].long()  # anchor indices
+            # curr_head_targets_anchor_indices: (3*bbox_num, 1)
+
+            # 所有正样本对应的索引：图像 id、合适的anchor索引、y 方向偏移到的格子的索引、x 方向偏移到的格子的索引
+            total_positive_indices.append((curr_head_targets_imgIds, curr_head_targets_anchor_indices, curr_head_targets_y_offsets_grids_indices.clamp_(0, curr_head_feature_map_size[3] - 1), curr_head_targets_x_offsets_grids_indices.clamp_(0, curr_head_feature_map_size[2] - 1)))  # image, anchor, grid indices
+            # 所有正样本对应的 bbox  
+            total_positive_bboxes.append(torch.cat((curr_head_targets_xy - curr_head_targets_offsets_grids_indices, curr_head_targets_wh), 1))  # box
+            # 所有正样本对应的 anchor 
+            total_positive_anchors.append(anchors[curr_head_targets_anchor_indices])  # anchors
+            # 所有正样本对应的类别 
+            total_positive_classes.append(curr_head_targets_classes)  # class
+            # 所有正样本
+            total_positive_targets.append(curr_head_targets)
+
+        return total_positive_classes, total_positive_bboxes, total_positive_indices, total_positive_anchors, total_positive_targets
+
+
+
 class ComputeLoss:
     # Compute losses
     def __init__(self, model, autobalance=False):
@@ -1384,7 +1858,7 @@ class ComputeLossAuxOTA:
                 + 3.0 * pair_wise_iou_loss
             )
 
-            matching_matrix = torch.zeros_like(cost)
+            matching_matrix = torch.zeros_like(cost, device="cpu")
 
             for gt_idx in range(num_gt):
                 _, pos_idx = torch.topk(
@@ -1537,7 +2011,7 @@ class ComputeLossAuxOTA:
                 + 3.0 * pair_wise_iou_loss
             )
 
-            matching_matrix = torch.zeros_like(cost)
+            matching_matrix = torch.zeros_like(cost, device="cpu")
 
             for gt_idx in range(num_gt):
                 _, pos_idx = torch.topk(

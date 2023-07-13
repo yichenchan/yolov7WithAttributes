@@ -1,0 +1,42 @@
+# train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
+train: /workspace/home/chenyichen/yolov7/scripts/chezai_dataset_with_attr.txt  # 118287 images
+val: /workspace/home/chenyichen/yolov7/scripts/chezai_dataset_with_attr.txt  # 5000 images
+test: /workspace/home/chenyichen/yolov7/scripts/chezai_dataset_with_attr.txt  # 20288 of 40670 images, submit to https://competitions.codalab.org/competitions/20794
+
+# number of classes
+nc: 10
+
+attribute_outputs: 90
+attribute_targets: 80
+
+# class names
+names: [
+    "vehicle",
+    "person",
+    "bus_station",
+    "traffic_light",
+    "guide_line",
+    "road_sign",
+    "bus_lane",
+    "zebra_line",
+    "grid_line",
+    "diversion_line"
+]
+
+
+# 车辆 32 + 人 21 + 红绿灯路牌 5 + 四种线 32 = 90
+# 属性顺序 [车辆类别（3），左车灯是否可见（1），左车灯状态（2），左车灯位置（4），
+#                      右车灯是否可见（1），右车灯状态（2），右车灯位置（4），
+#                      车屁股是否可见（1），车屁股框位置（4）
+#                      车头是否可见（1），车头框位置（4）
+#                      车牌是否可见（1），车牌位置（4），
+#         人的类别（2），人的状态（2）， 是否带头盔（2）
+#                     人头是否可见（1），人头的位置（4），
+#                     人骑的车是否可见（1），人骑的车的位置（4）
+#                     电动车车牌是否可见（1），车牌的位置（4），
+#         红绿灯的颜色（3），
+#         路牌的颜色（2），
+#         公交车道第一个点坐标（2），公交车道第二个点坐标（2），公交车道第三个点坐标（2），公交车道第四个点坐标（2），
+#         斑马线第一个点坐标（2），斑马线第二个点坐标（2），斑马线第三个点坐标（2），斑马线第四个点坐标（2），
+#         网格线第一个点坐标（2），网格线第二个点坐标（2），网格线第三个点坐标（2），网格线第四个点坐标（2），
+#         导流线第一个点坐标（2），导流线第二个点坐标（2），导流线第三个点坐标（2），导流线第四个点坐标（2）]
