@@ -1,0 +1,12 @@
+# train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
+train: /workspace/home/chenyichen/yolov7/scripts/all_train_data.txt  # 118287 images
+val: /workspace/home/chenyichen/yolov7/scripts/all_val_data.txt  # 5000 images
+test: /workspace/home/chenyichen/yolov7/scripts/all_test_data.txt  # 20288 of 40670 images, submit to https://competitions.codalab.org/competitions/20794
+
+# number of classes
+nc: 23
+
+# class names
+names: ["car_normal","car_seperator","car_zebra","car_body","car_face","car_butt","person","plate","zebra_crossing","left_signal","right_signal","seperate_area","grid_line","road_block","bus_lane","traffic_light","guide_line","motorcycle","motor_person","head","helmet","highway_sign","city_sign"]
+
+
