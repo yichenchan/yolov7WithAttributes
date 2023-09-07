@@ -104,14 +104,14 @@ def plot_wh_methods():  # from utils.plots import *; plot_wh_methods()
 
 def output_to_target(output):
     # Convert model output to target format [batch_id, class_id, x, y, w, h, conf]
+    # output is (xyxy, conf, cls, attributes_outputs)
     targets = []
     for i, o in enumerate(output):
-        for *box, conf, cls in o.cpu().numpy():
-            targets.append([i, cls, *list(*xyxy2xywh(np.array(box)[None])), conf])
+        for x1, y1, x2, y2, conf, cls, *attributes in o.cpu().numpy():
+            targets.append([i, cls, *list(*xyxy2xywh(np.array([x1, y1, x2, y2])[None])), conf, *attributes])
     return np.array(targets)
 
-
-def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max_size=640, max_subplots=16):
+def plot_images(images, targets, shapes=None, paths=None, fname='images.jpg', names=None, max_size=640, max_subplots=16, attribute_targets=0, plot_in_original_size=False):
     # Plot image grid with labels
 
     if isinstance(images, torch.Tensor):
@@ -123,70 +123,336 @@ def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max
     if np.max(images[0]) <= 1:
         images *= 255
 
-    tl = 3  # line thickness
+    tl = 1  # line thickness
     tf = max(tl - 1, 1)  # font thickness
     bs, _, h, w = images.shape  # batch size, _, height, width
     bs = min(bs, max_subplots)  # limit plot images
     ns = np.ceil(bs ** 0.5)  # number of subplots (square)
+    colors = color_list()  # list of colors
 
-    # Check if we should resize
+    # if dataset image is bigger than the max_size, then 
     scale_factor = max_size / max(h, w)
     if scale_factor < 1:
         h = math.ceil(scale_factor * h)
         w = math.ceil(scale_factor * w)
+    
+    if plot_in_original_size:
+        h = shapes[0][0][0]
+        w = shapes[0][0][1]
 
-    colors = color_list()  # list of colors
     mosaic = np.full((int(ns * h), int(ns * w), 3), 255, dtype=np.uint8)  # init
+
     for i, img in enumerate(images):
         if i == max_subplots:  # if last batch has fewer images than we expect
             break
-
-        block_x = int(w * (i // ns))
-        block_y = int(h * (i % ns))
-
+        
         img = img.transpose(1, 2, 0)
-        if scale_factor < 1:
-            img = cv2.resize(img, (w, h))
+        img = cv2.resize(img, (w, h))
 
-        mosaic[block_y:block_y + h, block_x:block_x + w, :] = img
+        if plot_in_original_size:
+            img = cv2.resize(cv2.cvtColor(cv2.imread(paths[i]), cv2.COLOR_BGR2RGB), (w, h)) 
+
         if len(targets) > 0:
             image_targets = targets[targets[:, 0] == i]
-            boxes = xywh2xyxy(image_targets[:, 2:6]).T
             classes = image_targets[:, 1].astype('int')
-            labels = image_targets.shape[1] == 6  # labels if no conf column
-            conf = None if labels else image_targets[:, 6]  # check for confidence presence (label vs pred)
+            boxes = xywh2xyxy(image_targets[:, 2:6]).T
+            is_labels = image_targets.shape[1] == (6 + attribute_targets)  # labels if no conf column
+            # if is labels: (batch_id, cls, x, y, w, h, attributes_targets)
+            # if is preds: (batch_id, cls, x, y, w, h, conf, attributes_outputs)
+            conf = None if is_labels else image_targets[:, 6]  # check for confidence presence (label vs pred)
 
             if boxes.shape[1]:
-                if boxes.max() <= 1.01:  # if normalized with tolerance 0.01
+                if boxes.max() <= 1.01 and not plot_in_original_size:  # if normalized with tolerance 0.01
                     boxes[[0, 2]] *= w  # scale to pixels
+                    boxes[[1, 3]] *= h
+                elif plot_in_original_size:
+                    if boxes.max() <= 1.01:
+                        boxes[[0, 2]] *= images.shape[3]
+                        boxes[[1, 3]] *= images.shape[2]
+                    # 去除 padding 的偏差
+                    dw_padded = shapes[i][1][1][0]
+                    boxes[[0, 2]] -= dw_padded
+                    w_ori = shapes[i][0][1]
+                    w_unpadded = shapes[i][1][0][1] * w_ori
+                    boxes[[0, 2]] /= w_unpadded
+                    boxes[[0, 2]] *= w
+                    dh_padded = shapes[i][1][1][1]
+                    boxes[[1, 3]] -= dh_padded
+                    h_ori = shapes[i][0][0]
+                    h_unpadded = shapes[i][1][0][0] * h_ori
+                    boxes[[1, 3]] /= h_unpadded
                     boxes[[1, 3]] *= h
                 elif scale_factor < 1:  # absolute coords need scale if image scales
                     boxes *= scale_factor
-            boxes[[0, 2]] += block_x
-            boxes[[1, 3]] += block_y
+
             for j, box in enumerate(boxes.T):
                 cls = int(classes[j])
                 color = colors[cls % len(colors)]
                 cls = names[cls] if names else cls
-                if labels or conf[j] > 0.25:  # 0.25 conf thresh
-                    label = '%s' % cls if labels else '%s %.1f' % (cls, conf[j])
-                    plot_one_box(box, mosaic, label=label, color=color, line_thickness=tl)
+
+                if is_labels or conf[j] > 0.25:  # 0.25 conf thresh
+                    label = '%s' % cls if is_labels else '%s %.1f' % (cls, conf[j])
+                    plot_one_box(box, img, label=label, color=color, line_thickness=tl)
+
+                attributes_info_str = ""
+
+                ################labels 的属性打印#########################
+                if(True):
+                    if is_labels and attribute_targets != 0:
+                        # for vehicle type
+                        if classes[j] == 0:
+                            car_type = str(image_targets[j, 6].astype('int'))
+                            left_light_seen = str(image_targets[j, 7].astype('int'))
+                            left_light_status = str(image_targets[j, 8].astype('int'))
+                            left_light_pos_x = image_targets[j, 9].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            left_light_pos_y = image_targets[j, 10].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            left_light_pos_w = image_targets[j, 11].astype('float') * int(box[2] - box[0]) 
+                            left_light_pos_h = image_targets[j, 12].astype('float') * int(box[3] - box[1])
+                            if float(left_light_seen) > 0.95:
+                                plot_one_box((left_light_pos_x, left_light_pos_y, left_light_pos_x + left_light_pos_w, left_light_pos_y + left_light_pos_h), img, label="left_light", color=color, line_thickness=tl)
+
+                            right_light_seen = str(image_targets[j, 13].astype('int'))
+                            right_light_status = str(image_targets[j, 14].astype('int'))
+                            right_light_pos_x = image_targets[j, 15].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            right_light_pos_y = image_targets[j, 16].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            right_light_pos_w = image_targets[j, 17].astype('float') * int(box[2] - box[0]) 
+                            right_light_pos_h = image_targets[j, 18].astype('float') * int(box[3] - box[1])
+                            if float(right_light_seen) > 0.95:
+                                plot_one_box((right_light_pos_x, right_light_pos_y, right_light_pos_x + right_light_pos_w, right_light_pos_y + right_light_pos_h), img, label="right_light", color=color, line_thickness=tl)
+
+                            car_butt_seen = str(image_targets[j, 19].astype('int'))
+                            car_butt_pos_x = image_targets[j, 20].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            car_butt_pos_y = image_targets[j, 21].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            car_butt_pos_w = image_targets[j, 22].astype('float') * int(box[2] - box[0]) 
+                            car_butt_pos_h = image_targets[j, 23].astype('float') * int(box[3] - box[1])
+                            if float(car_butt_seen) > 0.95:
+                                plot_one_box((car_butt_pos_x, car_butt_pos_y, car_butt_pos_x + car_butt_pos_w, car_butt_pos_y + car_butt_pos_h), img, label="car_butt", color=color, line_thickness=tl)
+
+                            car_head_seen = str(image_targets[j, 24].astype('int'))
+                            car_head_pos_x = image_targets[j, 25].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            car_head_pos_y = image_targets[j, 26].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            car_head_pos_w = image_targets[j, 27].astype('float') * int(box[2] - box[0]) 
+                            car_head_pos_h = image_targets[j, 28].astype('float') * int(box[3] - box[1])
+                            if float(car_head_seen) > 0.95:
+                                plot_one_box((car_head_pos_x, car_head_pos_y, car_head_pos_x + car_head_pos_w, car_head_pos_y + car_head_pos_h), img, label="car_head", color=color, line_thickness=tl)
+
+                            car_plate_seen = str(image_targets[j, 29].astype('int'))
+                            car_plate_pos_x = image_targets[j, 30].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            car_plate_pos_y = image_targets[j, 31].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            car_plate_pos_w = image_targets[j, 32].astype('float') * int(box[2] - box[0]) 
+                            car_plate_pos_h = image_targets[j, 33].astype('float') * int(box[3] - box[1])
+                            if float(car_plate_seen) > 0.95:
+                                plot_one_box((car_plate_pos_x, car_plate_pos_y, car_plate_pos_x + car_plate_pos_w, car_plate_pos_y + car_plate_pos_h), img, label="car_plate", color=color, line_thickness=tl)
+
+                            attributes_info_str = car_type + "|" + left_light_seen + left_light_status + "|" + right_light_seen + right_light_status + "|" + car_butt_seen + "|" + car_head_seen + "|" + car_plate_seen
+
+                        # for person type
+                        elif classes[j] == 1:
+                            person_type = str(image_targets[j, 34].astype('int'))
+                            person_status = str(image_targets[j, 35].astype('int'))
+                            helmet_state = str(image_targets[j, 36].astype('int'))
+
+                            person_head_seen = str(image_targets[j, 37].astype('int'))
+                            person_head_pos_x = image_targets[j, 38].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            person_head_pos_y = image_targets[j, 39].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            person_head_pos_w = image_targets[j, 40].astype('float') * int(box[2] - box[0]) 
+                            person_head_pos_h = image_targets[j, 41].astype('float') * int(box[3] - box[1])
+                            if float(person_head_seen) > 0.95:
+                                plot_one_box((person_head_pos_x, person_head_pos_y, person_head_pos_x + person_head_pos_w, person_head_pos_y + person_head_pos_h), img, label="person_head", color=color, line_thickness=tl)
+
+                            person_bike_seen = str(image_targets[j, 42].astype('int'))
+                            person_bike_pos_x = image_targets[j, 43].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            person_bike_pos_y = image_targets[j, 44].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            person_bike_pos_w = image_targets[j, 45].astype('float') * int(box[2] - box[0]) 
+                            person_bike_pos_h = image_targets[j, 46].astype('float') * int(box[3] - box[1])
+                            if float(person_bike_seen) > 0.95:
+                                plot_one_box((person_bike_pos_x, person_bike_pos_y, person_bike_pos_x + person_bike_pos_w, person_bike_pos_y + person_bike_pos_h), img, label="person_bike", color=color, line_thickness=tl)
+                                
+                            bike_plate_seen = str(image_targets[j, 47].astype('int'))
+                            bike_plate_pos_x = image_targets[j, 48].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            bike_plate_pos_y = image_targets[j, 49].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            bike_plate_pos_w = image_targets[j, 50].astype('float') * int(box[2] - box[0]) 
+                            bike_plate_pos_h = image_targets[j, 51].astype('float') * int(box[3] - box[1])
+                            if float(bike_plate_seen) > 0.95:
+                                plot_one_box((bike_plate_pos_x, bike_plate_pos_y, bike_plate_pos_x + bike_plate_pos_w, bike_plate_pos_y + bike_plate_pos_h), img, label="bike_plate", color=color, line_thickness=tl)
+
+                            attributes_info_str = person_type + "|" + person_status + helmet_state + "|" + person_head_seen + "|" + person_bike_seen + "|" + bike_plate_seen
+
+                        # for traffic light type
+                        elif classes[j] == 3:
+                            traffic_light_status = str(image_targets[j, 52].astype('int'))
+                            attributes_info_str = traffic_light_status
+
+                        # for road sign type
+                        elif classes[j] == 5:
+                            road_sign_status = str(image_targets[j, 53].astype('int'))
+                            attributes_info_str = road_sign_status
+
+                        elif classes[j] > 5:
+                            if image_targets[j, 54 + (int(classes[j]) - 6) * 8] != -1:
+                                p1_x = image_targets[j, 54 + (int(classes[j]) - 6) * 8].astype('float') * int(box[2] - box[0]) + int(box[0])
+                                p1_x = min(max(int(p1_x), 0), w)
+                                p1_y = image_targets[j, 55 + (int(classes[j]) - 6) * 8].astype('float') * int(box[3] - box[1]) + int(box[1])
+                                p1_y = min(max(int(p1_y), 0), h)
+                                p2_x = image_targets[j, 56 + (int(classes[j]) - 6) * 8].astype('float') * int(box[2] - box[0]) + int(box[0])
+                                p2_x = min(max(int(p2_x), 0), w)
+                                p2_y = image_targets[j, 57 + (int(classes[j]) - 6) * 8].astype('float') * int(box[3] - box[1]) + int(box[1])
+                                p2_y = min(max(int(p2_y), 0), h)
+                                p3_x = image_targets[j, 58 + (int(classes[j]) - 6) * 8].astype('float') * int(box[2] - box[0]) + int(box[0])
+                                p3_x = min(max(int(p3_x), 0), w)
+                                p3_y = image_targets[j, 59 + (int(classes[j]) - 6) * 8].astype('float') * int(box[3] - box[1]) + int(box[1])
+                                p3_y = min(max(int(p3_y), 0), h)
+                                p4_x = image_targets[j, 60 + (int(classes[j]) - 6) * 8].astype('float') * int(box[2] - box[0]) + int(box[0])
+                                p4_x = min(max(int(p4_x), 0), w)
+                                p4_y = image_targets[j, 61 + (int(classes[j]) - 6) * 8].astype('float') * int(box[3] - box[1]) + int(box[1])
+                                p4_y = min(max(int(p4_y), 0), h)
+                                cv2.fillPoly(img, [np.array([(p1_x, p1_y), (p2_x, p2_y), (p3_x, p3_y), (p4_x, p4_y)], np.int32)], color)
+                            
+                    ############## pred 属性的打印 ################################
+                    elif not is_labels and attribute_targets != 0:
+                        # for vehicle type
+                        if classes[j] == 0:
+                            car_type = str(image_targets[j, 7].astype('int'))
+                            car_type_conf = str(image_targets[j, 8].astype('float'))[:4]
+
+                            left_light_seen_conf = str(round(image_targets[j, 10].astype('float'), 2))
+                            left_light_status = str(image_targets[j, 11].astype('int'))
+                            left_light_status_conf = str(round(image_targets[j, 12].astype('float'), 2))
+                            left_light_pos_x = image_targets[j, 13].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            left_light_pos_y = image_targets[j, 14].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            left_light_pos_w = image_targets[j, 15].astype('float') * int(box[2] - box[0]) 
+                            left_light_pos_h = image_targets[j, 16].astype('float') * int(box[3] - box[1])
+                            if float(left_light_seen_conf) > 0.95:
+                                plot_one_box((left_light_pos_x, left_light_pos_y, left_light_pos_x + left_light_pos_w, left_light_pos_y + left_light_pos_h), img, label="left_light", color=color, line_thickness=tl)
+
+                            right_light_seen_conf = str(round(image_targets[j, 17].astype('float'), 2))
+                            right_light_status = str(image_targets[j, 18].astype('int'))
+                            right_light_status_conf = str(round(image_targets[j, 19].astype('float'), 2))
+                            right_light_pos_x = image_targets[j, 20].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            right_light_pos_y = image_targets[j, 21].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            right_light_pos_w = image_targets[j, 22].astype('float') * int(box[2] - box[0]) 
+                            right_light_pos_h = image_targets[j, 23].astype('float') * int(box[3] - box[1])
+                            if float(right_light_seen_conf) > 0.95:
+                                plot_one_box((right_light_pos_x, right_light_pos_y, right_light_pos_x + right_light_pos_w, right_light_pos_y + right_light_pos_h), img, label="right_light", color=color, line_thickness=tl)
+
+                            car_butt_seen_conf = str(round(image_targets[j, 24].astype('float'), 2))
+                            car_butt_pos_x = image_targets[j, 25].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            car_butt_pos_y = image_targets[j, 26].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            car_butt_pos_w = image_targets[j, 27].astype('float') * int(box[2] - box[0]) 
+                            car_butt_pos_h = image_targets[j, 28].astype('float') * int(box[3] - box[1])
+                            if float(car_butt_seen_conf) > 0.95:
+                                plot_one_box((car_butt_pos_x, car_butt_pos_y, car_butt_pos_x + car_butt_pos_w, car_butt_pos_y + car_butt_pos_h), img, label="car_butt", color=color, line_thickness=tl)
+                            
+                            car_head_seen_conf = str(round(image_targets[j, 29].astype('float'), 2))
+                            car_head_pos_x = image_targets[j, 30].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            car_head_pos_y = image_targets[j, 31].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            car_head_pos_w = image_targets[j, 32].astype('float') * int(box[2] - box[0]) 
+                            car_head_pos_h = image_targets[j, 33].astype('float') * int(box[3] - box[1])
+                            if float(car_head_seen_conf) > 0.95:
+                                plot_one_box((car_head_pos_x, car_head_pos_y, car_head_pos_x + car_head_pos_w, car_head_pos_y + car_head_pos_h), img, label="car_head", color=color, line_thickness=tl)
+
+                            car_plate_seen_conf = str(round(image_targets[j, 34].astype('float'), 2))
+                            car_plate_pos_x = image_targets[j, 35].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            car_plate_pos_y = image_targets[j, 36].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            car_plate_pos_w = image_targets[j, 37].astype('float') * int(box[2] - box[0]) 
+                            car_plate_pos_h = image_targets[j, 38].astype('float') * int(box[3] - box[1])
+                            if float(car_plate_seen_conf) > 0.95:
+                                plot_one_box((car_plate_pos_x, car_plate_pos_y, car_plate_pos_x + car_plate_pos_w, car_plate_pos_y + car_plate_pos_h), img, label="car_plate", color=color, line_thickness=tl)
+
+                            attributes_info_str = car_type + "(" + car_type_conf + ")" + "|" + left_light_seen_conf + "->" + left_light_status + "(" + left_light_status_conf + ")" + "|" + right_light_seen_conf + "->" + right_light_status + "(" + right_light_status_conf + ")" + "|" + car_butt_seen_conf + "|" + car_head_seen_conf + "|" + car_plate_seen_conf;
+
+                        # for person type
+                        if classes[j] == 1:
+                            person_type = str(image_targets[j, 39].astype('int'))
+                            person_type_conf = str(round(image_targets[j, 40].astype('float'), 2))
+                            person_status = str(image_targets[j, 41].astype('int'))
+                            person_status_conf = str(round(image_targets[j, 42].astype('float'), 2))
+                            helmet_state = str(image_targets[j, 43].astype('int'))
+                            helmet_state_conf = str(round(image_targets[j, 44].astype('float'), 2))
+
+                            person_head_seen_conf = str(round(image_targets[j, 45].astype('float'), 2))
+                            person_head_pos_x = image_targets[j, 46].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            person_head_pos_y = image_targets[j, 47].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            person_head_pos_w = image_targets[j, 48].astype('float') * int(box[2] - box[0]) 
+                            person_head_pos_h = image_targets[j, 49].astype('float') * int(box[3] - box[1])
+                            if float(person_head_seen_conf) > 0.95:
+                                plot_one_box((person_head_pos_x, person_head_pos_y, person_head_pos_x + person_head_pos_w, person_head_pos_y + person_head_pos_h), img, label="person_head", color=color, line_thickness=tl)
+
+                            person_bike_seen_conf = str(round(image_targets[j, 50].astype('float'), 2))
+                            person_bike_pos_x = image_targets[j, 51].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            person_bike_pos_y = image_targets[j, 52].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            person_bike_pos_w = image_targets[j, 53].astype('float') * int(box[2] - box[0]) 
+                            person_bike_pos_h = image_targets[j, 54].astype('float') * int(box[3] - box[1])
+                            if float(person_bike_seen_conf) > 0.95:
+                                plot_one_box((person_bike_pos_x, person_bike_pos_y, person_bike_pos_x + person_bike_pos_w, person_bike_pos_y + person_bike_pos_h), img, label="person_bike", color=color, line_thickness=tl)
+
+                            bike_plate_seen_conf = str(round(image_targets[j, 55].astype('float'), 2))
+                            bike_plate_pos_x = image_targets[j, 56].astype('float') * int(box[2] - box[0]) + int(box[0])
+                            bike_plate_pos_y = image_targets[j, 57].astype('float') * int(box[3] - box[1]) + int(box[1])
+                            bike_plate_pos_w = image_targets[j, 58].astype('float') * int(box[2] - box[0]) 
+                            bike_plate_pos_h = image_targets[j, 59].astype('float') * int(box[3] - box[1])
+                            if float(bike_plate_seen_conf) > 0.95:
+                                plot_one_box((bike_plate_pos_x, bike_plate_pos_y, bike_plate_pos_x + bike_plate_pos_w, bike_plate_pos_y + bike_plate_pos_h), img, label="bike_plate", color=color, line_thickness=tl)
+
+                            attributes_info_str = person_type + "(" + person_type_conf + ")" + "|" + person_status + "(" + person_status_conf + ")" + "|" + helmet_state + "(" + helmet_state_conf + ")" + "|" + person_head_seen_conf + "|" + person_bike_seen_conf + "|" + bike_plate_seen_conf
+
+                        # for traffic light type
+                        if classes[j] == 3:
+                            traffic_light_status = str(image_targets[j, 60].astype('int'))
+                            traffic_light_status_conf = str(round(image_targets[j, 61].astype('float'), 2))
+                            attributes_info_str = traffic_light_status + "(" + traffic_light_status_conf + ")" 
+
+                        # for road sign type
+                        if classes[j] == 5:
+                            road_sign_status = str(image_targets[j, 63].astype('int'))
+                            road_sign_status_conf = str(round(image_targets[j, 64].astype('float'), 2))
+                            attributes_info_str = road_sign_status + "(" + road_sign_status_conf + ")" 
+
+                        if classes[j] > 5:
+                            if image_targets[j, 65 + (int(classes[j]) - 6) * 8] != -1:
+                                p1_x = image_targets[j, 65 + (int(classes[j]) - 6) * 8].astype('float') * int(box[2] - box[0]) + int(box[0])
+                                p1_x = min(max(int(p1_x), 0), w)
+                                p1_y = image_targets[j, 66 + (int(classes[j]) - 6) * 8].astype('float') * int(box[3] - box[1]) + int(box[1])
+                                p1_y = min(max(int(p1_y), 0), h)
+                                p2_x = image_targets[j, 67 + (int(classes[j]) - 6) * 8].astype('float') * int(box[2] - box[0]) + int(box[0])
+                                p2_x = min(max(int(p2_x), 0), w)
+                                p2_y = image_targets[j, 68 + (int(classes[j]) - 6) * 8].astype('float') * int(box[3] - box[1]) + int(box[1])
+                                p2_y = min(max(int(p2_y), 0), h)
+                                p3_x = image_targets[j, 69 + (int(classes[j]) - 6) * 8].astype('float') * int(box[2] - box[0]) + int(box[0])
+                                p3_x = min(max(int(p3_x), 0), w)
+                                p3_y = image_targets[j, 70 + (int(classes[j]) - 6) * 8].astype('float') * int(box[3] - box[1]) + int(box[1])
+                                p3_y = min(max(int(p3_y), 0), h)
+                                p4_x = image_targets[j, 71 + (int(classes[j]) - 6) * 8].astype('float') * int(box[2] - box[0]) + int(box[0])
+                                p4_x = min(max(int(p4_x), 0), w)
+                                p4_y = image_targets[j, 72 + (int(classes[j]) - 6) * 8].astype('float') * int(box[3] - box[1]) + int(box[1])
+                                p4_y = min(max(int(p4_y), 0), h)
+                                cv2.fillPoly(img, [np.array([(p1_x, p1_y), (p2_x, p2_y), (p3_x, p3_y), (p4_x, p4_y)], np.int32)], color)
+
+                t_size = cv2.getTextSize(attributes_info_str, 0, fontScale=tl/3, thickness=tf)[0]
+                c1 = (int(box[0]), int(box[3]))
+                c2 = c1[0] + t_size[0], c1[1] - t_size[1] - 3
+                cv2.rectangle(img, c1, c2, color, -1, cv2.LINE_AA)  # filled
+                cv2.putText(img, attributes_info_str, (c1[0], c1[1] - 2), 0, tl/3, [225, 255, 255], thickness=1, lineType=cv2.LINE_AA)
 
         # Draw image filename labels
         if paths:
             label = Path(paths[i]).name[:40]  # trim to 40 char
             t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
-            cv2.putText(mosaic, label, (block_x + 5, block_y + t_size[1] + 5), 0, tl / 3, [220, 220, 220], thickness=tf,
+            cv2.putText(img, label, (5, t_size[1] + 5), 0, tl / 3, [220, 220, 220], thickness=tf,
                         lineType=cv2.LINE_AA)
 
         # Image border
-        cv2.rectangle(mosaic, (block_x, block_y), (block_x + w, block_y + h), (255, 255, 255), thickness=3)
+        cv2.rectangle(img, (0, 0), (w, h), (255, 255, 255), thickness=3)
+
+        block_x = int(w * (i // ns))
+        block_y = int(h * (i % ns))
+        mosaic[block_y : block_y + h, block_x : block_x + w, :] = img
 
     if fname:
-        r = min(1280. / max(h, w) / ns, 1.0)  # ratio to limit image size
-        mosaic = cv2.resize(mosaic, (int(ns * w * r), int(ns * h * r)), interpolation=cv2.INTER_AREA)
-        # cv2.imwrite(fname, cv2.cvtColor(mosaic, cv2.COLOR_BGR2RGB))  # cv2 save
-        Image.fromarray(mosaic).save(fname)  # PIL save
+        #r = min(1280. / max(h, w) / ns, 1.0)  # ratio to limit image size
+        #mosaic = cv2.resize(mosaic, (int(ns * w * r), int(ns * h * r)), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(fname.as_posix(), cv2.cvtColor(mosaic, cv2.COLOR_BGR2RGB))  # cv2 save
+
     return mosaic
 
 
