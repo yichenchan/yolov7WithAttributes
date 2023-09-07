@@ -258,8 +258,50 @@ class IDetectWithAttributes(nn.Module):
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
 
-                # x[i]（x,y,w,h,objectness,classes）经过 sigmoid 输出概率
-                y = x[i].sigmoid()
+                # 车辆类型分类使用 softmax 输出
+                x[i][..., 15:18] = torch.softmax(x[i][..., 15:18], dim=-1)
+                # 左车灯状态分类使用 softmax 输出
+                x[i][..., 19:21] = torch.softmax(x[i][..., 19:21], dim=-1)
+                # 右车灯状态分类使用 softmax 输出
+                x[i][..., 26:28] = torch.softmax(x[i][..., 26:28], dim=-1)
+                # 人的类别分类使用 softmax 输出
+                x[i][..., 47:49] = torch.softmax(x[i][..., 47:49], dim=-1)
+                # 人的状态分类使用 softmax 输出
+                x[i][..., 49:51] = torch.softmax(x[i][..., 49:51], dim=-1)
+                # 是否带头盔分类使用 softmax 输出
+                x[i][..., 51:53] = torch.softmax(x[i][..., 51:53], dim=-1)
+                # 红绿灯颜色分类使用 softmax 输出
+                x[i][..., 68:71] = torch.softmax(x[i][..., 68:71], dim=-1)
+                # 路牌颜色分类使用 softmax 输出
+                x[i][..., 71:73] = torch.softmax(x[i][..., 71:73], dim=-1)
+
+                # （x,y,w,h,objectness,classes）经过 sigmoid 输出,将分布置于0~1
+                x[i][..., : self.nc + 5] = torch.sigmoid(x[i][..., : self.nc + 5])   
+
+                # 所有“属性是否可见”的属性都使用 sigmoid 输出
+                x[i][..., [18, 25, 32, 37, 42, 53, 58, 63]] = torch.sigmoid(x[i][..., [18, 25, 32, 37, 42, 53, 58, 63]])   
+
+                # 左车灯位置使用sigmoid输出
+                x[i][..., 21:25] = torch.sigmoid(x[i][..., 21:25])
+                # 右车灯位置使用sigmoid输出
+                x[i][..., 28:32] = torch.sigmoid(x[i][..., 28:32])
+                # 车屁股位置使用sigmoid输出
+                x[i][..., 33:37] = torch.sigmoid(x[i][..., 33:37])
+                # 车头位置使用sigmoid输出
+                x[i][..., 38:42] = torch.sigmoid(x[i][..., 38:42])
+                # 车牌位置使用sigmoid输出
+                x[i][..., 43:47] = torch.sigmoid(x[i][..., 43:47])
+                # 人头位置使用sigmoid输出
+                x[i][..., 54:58] = torch.sigmoid(x[i][..., 54:58])
+                # 电动车位置使用sigmoid输出
+                x[i][..., 59:63] = torch.sigmoid(x[i][..., 59:63])
+                # 电动车车牌位置使用sigmoid输出
+                x[i][..., 64:68] = torch.sigmoid(x[i][..., 64:68])
+
+                # 四个关键点都用 sigmoid 输出
+                x[i][..., 73:] = torch.sigmoid(x[i][..., 73:])
+
+                y = x[i]
 
                 # ******预测框的坐标 y[..., 0:2] 的回归方式*********
                 # 1. anchors 框中心点落在 grid 的左上角
@@ -287,7 +329,7 @@ class IDetectWithAttributes(nn.Module):
         self.training |= self.export
 
         for i in range(self.nl):
-            # m[i] 为 fuse 之后的 IDetect 层
+            # m[i] 为 fuse 之后的 IDetectWithAttributes 层
             x[i] = self.m[i](x[i])  
 
             bs, _, ny, nx = x[i].shape 
@@ -297,17 +339,107 @@ class IDetectWithAttributes(nn.Module):
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
 
-                y = x[i].sigmoid()
-
                 # 如果不处于导出模式
                 if not torch.onnx.is_in_onnx_export():
+                    # 车辆类型分类使用 softmax 输出
+                    x[i][..., 15:18] = torch.softmax(x[i][..., 15:18], dim=-1)
+                    # 左车灯状态分类使用 softmax 输出
+                    x[i][..., 19:21] = torch.softmax(x[i][..., 19:21], dim=-1)
+                    # 右车灯状态分类使用 softmax 输出
+                    x[i][..., 26:28] = torch.softmax(x[i][..., 26:28], dim=-1)
+                    # 人的类别分类使用 softmax 输出
+                    x[i][..., 47:49] = torch.softmax(x[i][..., 47:49], dim=-1)
+                    # 人的状态分类使用 softmax 输出
+                    x[i][..., 49:51] = torch.softmax(x[i][..., 49:51], dim=-1)
+                    # 是否带头盔分类使用 softmax 输出
+                    x[i][..., 51:53] = torch.softmax(x[i][..., 51:53], dim=-1)
+                    # 红绿灯颜色分类使用 softmax 输出
+                    x[i][..., 68:71] = torch.softmax(x[i][..., 68:71], dim=-1)
+                    # 路牌颜色分类使用 softmax 输出
+                    x[i][..., 71:73] = torch.softmax(x[i][..., 71:73], dim=-1)
+
+                    # （x,y,w,h,objectness,classes）经过 sigmoid 输出,将分布置于0~1
+                    x[i][..., : self.nc + 5] = torch.sigmoid(x[i][..., : self.nc + 5])   
+
+                    # 所有“属性是否可见”的属性都使用 sigmoid 输出
+                    x[i][..., [18, 25, 32, 37, 42, 53, 58, 63]] = torch.sigmoid(x[i][..., [18, 25, 32, 37, 42, 53, 58, 63]])   
+
+                    # 左车灯位置使用sigmoid输出
+                    x[i][..., 21:25] = torch.sigmoid(x[i][..., 21:25])
+                    # 右车灯位置使用sigmoid输出
+                    x[i][..., 28:32] = torch.sigmoid(x[i][..., 28:32])
+                    # 车屁股位置使用sigmoid输出
+                    x[i][..., 33:37] = torch.sigmoid(x[i][..., 33:37])
+                    # 车头位置使用sigmoid输出
+                    x[i][..., 38:42] = torch.sigmoid(x[i][..., 38:42])
+                    # 车牌位置使用sigmoid输出
+                    x[i][..., 43:47] = torch.sigmoid(x[i][..., 43:47])
+                    # 人头位置使用sigmoid输出
+                    x[i][..., 54:58] = torch.sigmoid(x[i][..., 54:58])
+                    # 电动车位置使用sigmoid输出
+                    x[i][..., 59:63] = torch.sigmoid(x[i][..., 59:63])
+                    # 电动车车牌位置使用sigmoid输出
+                    x[i][..., 64:68] = torch.sigmoid(x[i][..., 64:68])
+
+                    # 四个关键点都用 sigmoid 输出
+                    x[i][..., 73:] = torch.sigmoid(x[i][..., 73:])
+
+                    y = x[i]
+
                     y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
                     y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
+
                 else:
-                    xy, wh, conf = y.split((2, 2, self.nc + 1), 4)  # y.tensor_split((2, 4, 5), 4)  # torch 1.8.0
-                    xy = xy * (2. * self.stride[i]) + (self.stride[i] * (self.grid[i] - 0.5))  # new xy
-                    wh = wh ** 2 * (4 * self.anchor_grid[i].data)  # new wh
-                    y = torch.cat((xy, wh, conf), 4)
+                    # 导出 onnx 模式下，将输出划分为不同的特征，然后分别加上 sigmoid 或者 softmax
+                    # 这样才能够利用 onnx 中的算子实现以上操作
+                    xy, wh, obj, classes, \
+                    carTypes, \
+                    leftLightSeen, leftLightStatus, leftLightPos, \
+                    rightLightSeen, rightLightStatus, rightLightPos, \
+                    carButtHeadPlateAttrs, \
+                    personTypes, personStatus, helmetStatus, \
+                    personHeadBikePlateAttrs, \
+                    trafficLightTypes, roadSignTypes, \
+                    segAttrs  = x[i].split((2, 2, 1, self.nc, \
+                                            3, \
+                                            1, 2, 4, \
+                                            1, 2, 4, \
+                                            15, \
+                                            2, 2, 2, \
+                                            15, \
+                                            3, 2, \
+                                            32), 4)  
+
+                    xy = xy.sigmoid() * (2. * self.stride[i]) + (self.stride[i] * (self.grid[i] - 0.5))  # new xy
+                    wh = wh.sigmoid() ** 2 * (4 * self.anchor_grid[i].data)  # new wh
+                    obj = obj.sigmoid()
+                    classes = classes.softmax(dim=-1)
+                    carTypes = carTypes.softmax(dim=-1)
+                    leftLightSeen = leftLightSeen.sigmoid()
+                    leftLightStatus = leftLightStatus.softmax(dim=-1)
+                    leftLightPos = leftLightPos.sigmoid()
+                    rightLightSeen = rightLightSeen.sigmoid()
+                    rightLightStatus = rightLightStatus.softmax(dim=-1)
+                    rightLightPos = rightLightPos.sigmoid()
+                    carButtHeadPlateAttrs = carButtHeadPlateAttrs.sigmoid()
+                    personTypes = personTypes.softmax(dim=-1)
+                    personStatus = personStatus.softmax(dim=-1)
+                    helmetStatus = helmetStatus.softmax(dim=-1)
+                    personHeadBikePlateAttrs = personHeadBikePlateAttrs.sigmoid()
+                    trafficLightTypes = trafficLightTypes.softmax(dim=-1)
+                    roadSignTypes = roadSignTypes.softmax(dim=-1)
+                    segAttrs = segAttrs.sigmoid()
+
+                    y = torch.cat((xy, wh, obj, classes, \
+                                    carTypes, \
+                                    leftLightSeen, leftLightStatus, leftLightPos, \
+                                    rightLightSeen, rightLightStatus, rightLightPos, \
+                                    carButtHeadPlateAttrs, \
+                                    personTypes, personStatus, helmetStatus, \
+                                    personHeadBikePlateAttrs, \
+                                    trafficLightTypes, roadSignTypes, \
+                                    segAttrs), 4)
+
                 z.append(y.view(bs, -1, self.no))
 
         if self.training:
@@ -883,10 +1015,10 @@ class Model(nn.Module):
                 delattr(m, 'bn')  # remove batchnorm
                 m.forward = m.fuseforward  # update forward
             elif isinstance(m, (IDetect, IAuxDetect, IDetectWithAttributes)):
-            #elif isinstance(m, (IDetect, IAuxDetect)):
                 m.fuse()
                 m.forward = m.fuseforward
-        self.info()
+
+        #self.info()
         return self
 
     def nms(self, mode=True):  # add or remove NMS module
