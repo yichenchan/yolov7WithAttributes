@@ -1,7 +1,6 @@
-# train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
-train: /workspace/home/chenyichen/yolov7/scripts/chezai_dataset_with_attr.txt  # 118287 images
-val: /workspace/home/chenyichen/yolov7/scripts/chezai_dataset_with_attr.txt  # 5000 images
-test: /workspace/home/chenyichen/yolov7/scripts/chezai_dataset_with_attr.txt  # 20288 of 40670 images, submit to https://competitions.codalab.org/competitions/20794
+train: /workspace/home/chenyichen/yolov7/scripts/all_train_data.txt  
+val: /workspace/home/chenyichen/yolov7/scripts/all_val_data.txt  
+test: /workspace/home/chenyichen/yolov7/scripts/all_test_data.txt  
 
 # number of classes
 nc: 10
@@ -29,7 +28,7 @@ names: [
 #                      右车灯是否可见（1），右车灯状态（2），右车灯位置（4），
 #                      车屁股是否可见（1），车屁股框位置（4）
 #                      车头是否可见（1），车头框位置（4）
-#                      车牌是否可见（1），车牌位置（4），
+#                      车牌是否可见（1），车牌位置（4)，
 #         人的类别（2），人的状态（2）， 是否带头盔（2）
 #                     人头是否可见（1），人头的位置（4），
 #                     人骑的车是否可见（1），人骑的车的位置（4）
