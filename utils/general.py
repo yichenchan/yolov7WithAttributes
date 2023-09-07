@@ -626,8 +626,14 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
     merge = False  # use merge-NMS
 
     t = time.time()
-    output = [torch.zeros((0, 6 + attribute_outputs), device=prediction.device)] * prediction.shape[0]
+    # output be like (xyxy, conf, cls, attributes)
+    output = [torch.zeros((0, 6 + attribute_outputs), device=prediction.device)] * prediction.shape[0] 
+
+    # prediction be like (batch_size, na*ny*nx, no)
     for xi, x in enumerate(prediction):  # image index, image inference
+        # xi(0~batch_size) is the index of image in a batch
+        # x be like (na*ny*nx, (xywh, obj, cls_one-hot, attribute_outputs))
+
         # Apply constraints
         # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
         x = x[xc[xi]]  # confidence
@@ -653,18 +659,90 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
             x[:, 5 : nc] *= x[:, 4:5]  # conf = obj_conf * cls_conf
 
         # Box (center x, center y, width, height) to (x1, y1, x2, y2)
+        box_xywh = x[:, :4]
         box = xywh2xyxy(x[:, :4])
 
         # attributes
-        attributes = x[:, 5 + nc : 5 + nc + attribute_outputs] 
+        attributes = x[:, 5 + nc : 5 + nc + attribute_outputs]
+        if attribute_outputs != 0:
+            # 占位符
+            place_holder = torch.full_like(attributes[:, 0:1], -1)
 
-        # Detections matrix nx6 (xyxy, conf, cls)
+            car_type_conf, car_type = attributes[:, 0:3].max(1, keepdims=True)
+            car_left_light_seen_conf = attributes[:, 3:4]
+            car_left_light_status_conf, car_left_light_status = attributes[:, 4:6].max(1, keepdims=True)
+            car_left_light_x = attributes[:, 6:7] 
+            car_left_light_y = attributes[:, 7:8] 
+            car_left_light_w = attributes[:, 8:9] 
+            car_left_light_h = attributes[:, 9:10]
+            car_right_light_seen_conf = attributes[:, 10:11]
+            car_right_light_status_conf, car_right_light_status = attributes[:, 11:13].max(1, keepdims=True)
+            car_right_light_x = attributes[:, 13:14] 
+            car_right_light_y = attributes[:, 14:15] 
+            car_right_light_w = attributes[:, 15:16] 
+            car_right_light_h = attributes[:, 16:17] 
+            car_butt_seen_conf = attributes[:, 17:18]
+            car_butt_x = attributes[:, 18:19] 
+            car_butt_y = attributes[:, 19:20] 
+            car_butt_w = attributes[:, 20:21] 
+            car_butt_h = attributes[:, 21:22] 
+            car_head_seen_conf = attributes[:, 22:23]
+            car_head_x = attributes[:, 23:24] 
+            car_head_y = attributes[:, 24:25] 
+            car_head_w = attributes[:, 25:26] 
+            car_head_h = attributes[:, 26:27] 
+            car_plate_seen_conf = attributes[:, 27:28]
+            car_plate_x = attributes[:, 28:29] 
+            car_plate_y = attributes[:, 29:30] 
+            car_plate_w = attributes[:, 30:31] 
+            car_plate_h = attributes[:, 31:32] 
+            person_type_conf, person_type = attributes[:, 32:34].max(1, keepdims=True)
+            person_status_conf, person_status_type = attributes[:, 34:36].max(1, keepdims=True)
+            if_helmet_on_conf, if_helmet_on = attributes[:, 36:38].max(1, keepdims=True)
+            person_head_seen_conf = attributes[:, 38:39]
+            person_head_x = attributes[:, 39:40] 
+            person_head_y = attributes[:, 40:41] 
+            person_head_w = attributes[:, 41:42] 
+            person_head_h = attributes[:, 42:43] 
+            person_bike_seen_conf = attributes[:, 43:44]
+            person_bike_x = attributes[:, 44:45] 
+            person_bike_y = attributes[:, 45:46] 
+            person_bike_w = attributes[:, 46:47] 
+            person_bike_h = attributes[:, 47:48] 
+            bike_plate_seen_conf = attributes[:, 48:49]
+            bike_plate_x = attributes[:, 49:50] 
+            bike_plate_y = attributes[:, 50:51] 
+            bike_plate_w = attributes[:, 51:52] 
+            bike_plate_h = attributes[:, 52:53] 
+            traffic_light_color_conf, traffic_light_color = attributes[:, 53:56].max(1, keepdims=True)
+            road_sign_color_conf, road_sign_color = attributes[:, 56:58].max(1, keepdims=True)
+            # others
+            others = attributes[:, 58:]
+             
+            # 其中 -1 是为了占位
+            attributes = torch.cat((
+                car_type, car_type_conf, place_holder, 
+                car_left_light_seen_conf, car_left_light_status, car_left_light_seen_conf, car_left_light_x, car_left_light_y, car_left_light_w, car_left_light_h,
+                car_right_light_seen_conf, car_right_light_status, car_right_light_status_conf, car_right_light_x, car_right_light_y, car_right_light_w, car_right_light_h,
+                car_butt_seen_conf, car_butt_x, car_butt_y, car_butt_w, car_butt_h, 
+                car_head_seen_conf, car_head_x, car_head_y, car_head_w, car_head_h,
+                car_plate_seen_conf, car_plate_x, car_plate_y, car_plate_w, car_plate_h,
+                person_type, person_status_conf, person_status_type, person_status_conf, if_helmet_on, if_helmet_on_conf,
+                person_head_seen_conf, person_head_x, person_head_y, person_head_w, person_head_h,
+                person_bike_seen_conf, person_bike_x, person_bike_y, person_bike_w, person_bike_h,
+                bike_plate_seen_conf, bike_plate_x, bike_plate_y, bike_plate_w, bike_plate_h,
+                traffic_light_color, traffic_light_color_conf, place_holder, 
+                road_sign_color, road_sign_color_conf,
+                others
+            ), 1)
+
+        # Detections matrix nx6 (xyxy, conf, cls, attributes)
         if multi_label:
             i, j = (x[:, 5 : nc] > conf_thres).nonzero(as_tuple=False).T
             x = torch.cat((box[i], x[i, j + 5, None], j[:, None].float(), attributes[i]), 1)
         else:  # best class only
-            conf, j = x[:, 5 : nc].max(1, keepdim=True)
-            x = torch.cat((box, conf, j.float(), attributes[i]), 1)[conf.view(-1) > conf_thres]
+            conf, class_index = x[:, 5 : 5 + nc].max(1, keepdim=True)
+            x = torch.cat((box, conf, class_index.float(), attributes), 1)[conf.view(-1) > conf_thres]
 
         # Filter by class
         if classes is not None:
@@ -682,11 +760,15 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
             x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence
 
         # Batched NMS
-        c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
-        boxes, scores = x[:, :4] + c, x[:, 4]  # boxes (offset by class), scores
+        # c 指的是是否对不同类别的 bounding box 进行偏置，从而在进行 nms 的时候不同类别的框不会重叠
+        offset_by_classes = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
+        boxes, scores = x[:, :4] + offset_by_classes, x[:, 4]  # boxes (offset by class), scores
+
         i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+
         if i.shape[0] > max_det:  # limit detections
             i = i[:max_det]
+
         if merge and (1 < n < 3E3):  # Merge NMS (boxes merged using weighted mean)
             # update boxes as boxes(i,4) = weights(i,n) * boxes(n,4)
             iou = box_iou(boxes[i], boxes) > iou_thres  # iou matrix
@@ -696,6 +778,7 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
                 i = i[iou.sum(1) > 1]  # require redundancy
 
         output[xi] = x[i]
+
         if (time.time() - t) > time_limit:
             print(f'WARNING: NMS time limit {time_limit}s exceeded')
             break  # time limit exceeded
