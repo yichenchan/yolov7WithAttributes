@@ -483,6 +483,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 shape = exif_size(im)  # image size
                 segments = []  # instance segments
                 attributes = []
+
                 assert (shape[0] > 9) & (shape[1] > 9), f'image size {shape} < 10 pixels'
                 assert im.format.lower() in img_formats, f'invalid image format {im.format}'
 
@@ -490,28 +491,38 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 if os.path.isfile(lb_file):
                     nf += 1  # label found
                     with open(lb_file, 'r') as f:
+
                         l = [x.split() for x in f.read().strip().splitlines()]
+
                         # 当标签是分割数据集且不是带属性标签时
                         if self.attribute_targets == 0:
                             if any([len(x) > 8 for x in l]):  # is segment
                                 classes = np.array([x[0] for x in l], dtype=np.float32)
                                 segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in l]  # (cls, xy1...)
                                 l = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
+
                         l = np.array(l, dtype=np.float32)
+
                     if len(l):
                         assert l.shape[1] == 5 + self.attribute_targets, 'number of labels values is not correct'
+
                         # 当需要预测属性值时，标签可以为 -1，类别可以大于 1
                         if self.attribute_targets == 0:
                             assert (l >= 0).all(), 'negative labels'
                             assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels'
+
                         assert np.unique(l, axis=0).shape[0] == l.shape[0], 'duplicate labels'
+                    
                     else:
                         ne += 1  # label empty
                         l = np.zeros((0, 5 + self.attribute_targets), dtype=np.float32)
+                
                 else:
                     nm += 1  # label missing
                     l = np.zeros((0, 5 + self.attribute_targets), dtype=np.float32)
+
                 x[im_file] = [l, shape, segments]
+
             except Exception as e:
                 nc += 1
                 print(f'{prefix}WARNING: Ignoring corrupted image and/or label {im_file}: {e}')
@@ -542,9 +553,15 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
     def __getitem__(self, index):
         index = self.indices[index]  # linear, shuffled, or image_weights
 
+        # 类别 6、7、8、9 因为有关键点数据，所以不允许出现在马赛克中
+        is_excluded_index = False
+        if(self.attribute_targets != 0):
+            if (7 in self.labels[index][:, 0]) or (8 in self.labels[index][:, 0]) or (9 in self.labels[index][:, 0]) or (6 in self.labels[index][:, 0]):
+                is_excluded_index = True
+
         hyp = self.hyp
         mosaic = self.mosaic and random.random() < hyp['mosaic']
-        if mosaic and self.attribute_targets == 0:
+        if mosaic and not is_excluded_index:
             # Load mosaic
             if random.random() < 0.8:
                 img, labels = load_mosaic(self, index)
@@ -564,18 +581,23 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         else:
             # Load image
+            # h0 is origin img_h, h is resized img_h
             img, (h0, w0), (h, w) = load_image(self, index)
 
             # Letterbox
-            shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
-            img, ratio, pad = letterbox(img, shape, auto=False, scaleup=(self.augment and self.attribute_targets == 0))
-            shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
+            # ensure that the size of each batch of images is compatible with the architecture of the neural network being used for training
+            nearest_shape_compatible_with_nn = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+            # 放缩+填充图片使得它尺寸变为兼容网络结构的最近的尺寸
+            img, ratio, pad = letterbox(img, nearest_shape_compatible_with_nn, auto=False, scaleup=(self.augment and self.attribute_targets == 0))
+            shapes = (h0, w0), ((h / h0, w / w0), pad)  
 
             labels = self.labels[index].copy()
-            if labels.size:  # normalized xywh to pixel xyxy format
-                labels[:, 1:] = xywhn2xyxy(labels[:, 1:], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
 
-        if self.augment and self.attribute_targets == 0:
+            # first transformation
+            if labels.size:  # normalized xywh to pixel xyxy format
+                labels[:, 1:5] = xywhn2xyxy(labels[:, 1:5], ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
+
+        if self.augment:
             # Augment imagespace
             if not mosaic:
                 img, labels = random_perspective(img, labels,
@@ -583,8 +605,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                                                  translate=hyp['translate'],
                                                  scale=hyp['scale'],
                                                  shear=hyp['shear'],
-                                                 perspective=hyp['perspective'])
-            
+                                                 perspective=hyp['perspective'],
+                                                 with_attributes=(self.attribute_targets != 0))
             
             #img, labels = self.albumentations(img, labels)
 
@@ -609,11 +631,13 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         nL = len(labels)  # number of labels
         if nL:
+            # second transformation
             labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])  # convert xyxy to xywh
             labels[:, [2, 4]] /= img.shape[0]  # normalized height 0-1
             labels[:, [1, 3]] /= img.shape[1]  # normalized width 0-1
 
-        if self.augment and self.attribute_targets == 0:
+
+        if self.augment:
             # flip up-down
             if random.random() < hyp['flipud']:
                 img = np.flipud(img)
@@ -713,13 +737,298 @@ def hist_equalize(img, clahe=True, bgr=False):
     return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR if bgr else cv2.COLOR_YUV2RGB)  # convert YUV image to RGB
 
 
+def split_attributes_into_seperate_boxes(labels, base_num):
+        # [
+        # cls_index(0), x(1), y(2), w(3), h(4), 
+        # 车辆类别（5），
+        # 左车灯是否可见（6），左车灯状态（7），左车灯位置（8\9\10\11），
+        # 右车灯是否可见（12），右车灯状态（13），右车灯位置（14\15\16\17），
+        # 车屁股是否可见（18），车屁股框位置（19\20\21\22）
+        # 车头是否可见（23），车头框位置（24\25\26\27）
+        # 车牌是否可见（28），车牌位置（29\30\31\32），
+        # 人的类别（33），人的状态（34）， 是否带头盔（35）
+        # 人头是否可见（36），人头的位置（37\38\39\40），
+        # 人骑的车是否可见（41），人骑的车的位置（42\43\44\45）
+        # 电动车车牌是否可见（46），车牌的位置（47\48\49\50），
+        # 红绿灯的颜色（51），
+        # 路牌的颜色（52），
+        # 公交车道第一个点坐标（53\54），公交车道第二个点坐标（55\56），公交车道第三个点坐标（57\58），公交车道第四个点坐标（59\60），
+        # 斑马线第一个点坐标（61\62），斑马线第二个点坐标（63\64），斑马线第三个点坐标（65\66），斑马线第四个点坐标（67\68），
+        # 网格线第一个点坐标（69\70），网格线第二个点坐标（71\72），网格线第三个点坐标（73\74），网格线第四个点坐标（75\76），
+        # 导流线第一个点坐标（77\78），导流线第二个点坐标（79\80），导流线第三个点坐标（81\82），导流线第四个点坐标（83\84）
+        # ]
+    seperate_labels = []
+    for index, label in enumerate(labels):
+        class_index = label[0]
+
+        if(class_index == 0):
+            # 车辆本体
+            seperate_labels.append([0.0, label[1], label[2], label[3], label[4], label[5], -1, -1, base_num + index])
+            # 左车灯
+            if(label[6] == 1):
+                seperate_labels.append([0.1, 
+                                        label[1] + label[3] * label[8] + label[3] * label[10] / 2 - label[3] / 2,
+                                        label[2] + label[4] * label[9] + label[4] * label[11] / 2 - label[4] / 2,
+                                        label[3] * label[10],
+                                        label[4] * label[11],
+                                        label[7], -1, -1, base_num + index
+                                        ])
+            # 右车灯
+            if(label[12] == 1):
+                seperate_labels.append([0.2, 
+                                        label[1] + label[3] * label[14] + label[3] * label[16] / 2 - label[3] / 2,
+                                        label[2] + label[4] * label[15] + label[4] * label[17] / 2 - label[4] / 2,
+                                        label[3] * label[16],
+                                        label[4] * label[17],
+                                        label[13], -1, -1, base_num + index
+                                        ])
+            # 车屁股
+            if(label[18] == 1):
+                seperate_labels.append([0.3, 
+                                        label[1] + label[3] * label[19] + label[3] * label[21] / 2 - label[3] / 2,
+                                        label[2] + label[4] * label[20] + label[4] * label[22] / 2 - label[4] / 2,
+                                        label[3] * label[21],
+                                        label[4] * label[22],
+                                        -1, -1, -1, base_num + index
+                                        ])
+            # 车头
+            if(label[23] == 1):
+                seperate_labels.append([0.4, 
+                                        label[1] + label[3] * label[24] + label[3] * label[26] / 2 - label[3] / 2,
+                                        label[2] + label[4] * label[25] + label[4] * label[27] / 2 - label[4] / 2,
+                                        label[3] * label[26],
+                                        label[4] * label[27],
+                                        -1, -1, -1, base_num + index
+                                        ])
+            # 车牌
+            if(label[28] == 1):
+                seperate_labels.append([0.5, 
+                                        label[1] + label[3] * label[29] + label[3] * label[31] / 2 - label[3] / 2,
+                                        label[2] + label[4] * label[30] + label[4] * label[32] / 2 - label[4] / 2,
+                                        label[3] * label[31],
+                                        label[4] * label[32],
+                                        -1, -1, -1, base_num + index
+                                        ])
+
+        if(class_index == 1):
+            # 行人本体
+            seperate_labels.append([1.0, label[1], label[2], label[3], label[4], label[33], label[34], label[35], base_num + index])
+            # 人头
+            if(label[36] == 1):
+                seperate_labels.append([1.1, 
+                                        label[1] + label[3] * label[37] + label[3] * label[39] / 2 - label[3] / 2,
+                                        label[2] + label[4] * label[38] + label[4] * label[40] / 2 - label[4] / 2,
+                                        label[3] * label[39],
+                                        label[4] * label[40],
+                                        -1, -1, -1, base_num + index
+                                        ])
+            # 人骑的车
+            if(label[12] == 1):
+                seperate_labels.append([1.2, 
+                                        label[1] + label[3] * label[42] + label[3] * label[44] / 2 - label[3] / 2,
+                                        label[2] + label[4] * label[43] + label[4] * label[45] / 2 - label[4] / 2,
+                                        label[3] * label[44],
+                                        label[4] * label[45],
+                                        -1, -1, -1, base_num + index
+                                        ])
+            # 电动车车牌
+            if(label[18] == 1):
+                seperate_labels.append([1.3, 
+                                        label[1] + label[3] * label[47] + label[3] * label[49] / 2 - label[3] / 2,
+                                        label[2] + label[4] * label[48] + label[4] * label[50] / 2 - label[4] / 2,
+                                        label[3] * label[49],
+                                        label[4] * label[50],
+                                        -1, -1, -1, base_num + index
+                                        ])
+        if(class_index == 2):
+            # 公交站台本体
+            seperate_labels.append([2.0, label[1], label[2], label[3], label[4], -1, -1, -1, base_num + index])
+        if(class_index == 3):
+            # 红绿灯本体
+            seperate_labels.append([3.0, label[1], label[2], label[3], label[4], label[51], -1, -1, base_num + index])
+        if(class_index == 4):
+            # 导向线本体
+            seperate_labels.append([4.0, label[1], label[2], label[3], label[4], -1, -1, -1, base_num + index])
+        if(class_index == 5):
+            # 路牌本体
+            seperate_labels.append([5.0, label[1], label[2], label[3], label[4], label[52], -1, -1, base_num + index])
+        if(int(class_index) in [6, 7, 8, 9]):
+            seperate_labels.append([class_index, label[1], label[2], label[3], label[4], -1, -1, -1, base_num + index])
+            seperate_labels.append([class_index + 0.1, 
+                    label[53 + int(class_index - 6) * 8] * label[3] + label[1] - label[3] / 2,
+                    label[54 + int(class_index - 6) * 8] * label[4] + label[2] - label[4] / 2, 0.0001, 0.0001, -1, -1, -1, base_num + index])
+            seperate_labels.append([class_index + 0.2, 
+                    label[55 + int(class_index - 6) * 8] * label[3] + label[1] - label[3] / 2,
+                    label[56 + int(class_index - 6) * 8] * label[4] + label[2] - label[4] / 2, 0.0001, 0.0001, -1, -1, -1, base_num + index])
+            seperate_labels.append([class_index + 0.3, 
+                    label[57 + int(class_index - 6) * 8] * label[3] + label[1] - label[3] / 2,
+                    label[58 + int(class_index - 6) * 8] * label[4] + label[2] - label[4] / 2, 0.0001, 0.0001, -1, -1, -1, base_num + index])                        
+            seperate_labels.append([class_index + 0.4, 
+                    label[59 + int(class_index - 6) * 8] * label[3] + label[1] - label[3] / 2,
+                    label[60 + int(class_index - 6) * 8] * label[4] + label[2] - label[4] / 2, 0.0001, 0.0001, -1, -1, -1, base_num + index])
+
+    return  np.array(seperate_labels)
+
+
+def restore_seperate_boxes_into_attributes(labels):
+     # [
+        # cls_index(0), x(1), y(2), w(3), h(4), 
+        # 车辆类别（5），
+        # 左车灯是否可见（6），左车灯状态（7），左车灯位置（8\9\10\11），
+        # 右车灯是否可见（12），右车灯状态（13），右车灯位置（14\15\16\17），
+        # 车屁股是否可见（18），车屁股框位置（19\20\21\22）
+        # 车头是否可见（23），车头框位置（24\25\26\27）
+        # 车牌是否可见（28），车牌位置（29\30\31\32），
+        # 人的类别（33），人的状态（34）， 是否带头盔（35）
+        # 人头是否可见（36），人头的位置（37\38\39\40），
+        # 人骑的车是否可见（41），人骑的车的位置（42\43\44\45）
+        # 电动车车牌是否可见（46），车牌的位置（47\48\49\50），
+        # 红绿灯的颜色（51），
+        # 路牌的颜色（52），
+        # 公交车道第一个点坐标（53\54），公交车道第二个点坐标（55\56），公交车道第三个点坐标（57\58），公交车道第四个点坐标（59\60），
+        # 斑马线第一个点坐标（61\62），斑马线第二个点坐标（63\64），斑马线第三个点坐标（65\66），斑马线第四个点坐标（67\68），
+        # 网格线第一个点坐标（69\70），网格线第二个点坐标（71\72），网格线第三个点坐标（73\74），网格线第四个点坐标（75\76），
+        # 导流线第一个点坐标（77\78），导流线第二个点坐标（79\80），导流线第三个点坐标（81\82），导流线第四个点坐标（83\84）
+        # ]
+    labels_with_attri = [] 
+    major_class = []
+    minor_class = []
+    for label in labels:
+        if(label[0] % 1 == 0):
+            major_class.append(label)
+        else:
+            minor_class.append(label)
+    
+    for label in major_class:
+        label_with_attri = [-1] * 85
+        label_with_attri[0:5] = label[0:5]
+
+        box_w = (label_with_attri[3] - label_with_attri[1]) + 0.0000001
+        box_h = (label_with_attri[4] - label_with_attri[2]) + 0.0000001
+
+        bbox_id = label[-1]
+        class_index = label[0]
+        if(class_index == 0):
+            label_with_attri[5] = label[5]
+            # 五个“是否可见”属性首先置为 0,然后去搜索对应的子框，找到了就置 1
+            index = [6, 12, 18, 23, 28]
+            for i in index:
+                label_with_attri[i] = 0
+            for attr in minor_class:
+                # 左车灯
+                if(attr[0] == 0.1 and attr[-1] == bbox_id and label[3] != 0 and label[4] != 0):
+                    label_with_attri[6] = 1
+                    label_with_attri[7] = attr[5]
+                    label_with_attri[8] = (attr[1] - label[1]) / box_w
+                    label_with_attri[9] = (attr[2] - label[2]) / box_h
+                    label_with_attri[10] = (attr[3] - attr[1]) / box_w
+                    label_with_attri[11] = (attr[4] - attr[2]) / box_h
+                # 右车灯
+                if(attr[0] == 0.2 and attr[-1] == bbox_id and label[3] != 0 and label[4] != 0):
+                    label_with_attri[12] = 1
+                    label_with_attri[13] = attr[5]
+                    label_with_attri[14] = (attr[1] - label[1]) / box_w
+                    label_with_attri[15] = (attr[2] - label[2]) / box_h
+                    label_with_attri[16] = (attr[3] - attr[1]) / box_w
+                    label_with_attri[17] = (attr[4] - attr[2]) / box_h
+                # 车屁股
+                if(attr[0] == 0.3 and attr[-1] == bbox_id and label[3] != 0 and label[4] != 0):
+                    label_with_attri[18] = 1
+                    label_with_attri[19] = (attr[1] - label[1]) / box_w
+                    label_with_attri[20] = (attr[2] - label[2]) / box_h
+                    label_with_attri[21] = (attr[3] - attr[1]) / box_w
+                    label_with_attri[22] = (attr[4] - attr[2]) / box_h
+                # 车头
+                if(attr[0] == 0.4 and attr[-1] == bbox_id and label[3] != 0 and label[4] != 0):
+                    label_with_attri[23] = 1
+                    label_with_attri[24] = (attr[1] - label[1]) / box_w
+                    label_with_attri[25] = (attr[2] - label[2]) / box_h
+                    label_with_attri[26] = (attr[3] - attr[1]) / box_w
+                    label_with_attri[27] = (attr[4] - attr[2]) / box_h
+                # 车牌
+                if(attr[0] == 0.5 and attr[-1] == bbox_id and label[3] != 0 and label[4] != 0):
+                    label_with_attri[28] = 1
+                    label_with_attri[29] = (attr[1] - label[1]) / box_w
+                    label_with_attri[30] = (attr[2] - label[2]) / box_h
+                    label_with_attri[31] = (attr[3] - attr[1]) / box_w
+                    label_with_attri[32] = (attr[4] - attr[2]) / box_h
+                    
+        if(class_index == 1):
+            label_with_attri[33:36] = label[5:8]
+            index = [36, 41, 46]
+            for i in index:
+                label_with_attri[i] = 0
+            for attr in minor_class:
+                # 人头
+                if(attr[0] == 1.1 and attr[-1] == bbox_id and label[3] != 0 and label[4] != 0):
+                    label_with_attri[36] = 1
+                    label_with_attri[37] = (attr[1] - label[1]) / box_w
+                    label_with_attri[38] = (attr[2] - label[2]) / box_h
+                    label_with_attri[39] = (attr[3] - attr[1]) / box_w
+                    label_with_attri[40] = (attr[4] - attr[2]) / box_h
+                # 电动车
+                if(attr[0] == 1.2 and attr[-1] == bbox_id and label[3] != 0 and label[4] != 0):
+                    label_with_attri[41] = 1
+                    label_with_attri[42] = (attr[1] - label[1]) / box_w
+                    label_with_attri[43] = (attr[2] - label[2]) / box_h
+                    label_with_attri[44] = (attr[3] - attr[1]) / box_w
+                    label_with_attri[45] = (attr[4] - attr[2]) / box_h
+                # 电动车车牌
+                if(attr[0] == 1.3 and attr[-1] == bbox_id and label[3] != 0 and label[4] != 0):
+                    label_with_attri[46] = 1
+                    label_with_attri[47] = (attr[1] - label[1]) / box_w
+                    label_with_attri[48] = (attr[2] - label[2]) / box_h
+                    label_with_attri[49] = (attr[3] - attr[1]) / box_w
+                    label_with_attri[50] = (attr[4] - attr[2]) / box_h
+            
+        if(class_index == 3):
+            label_with_attri[51] = label[5]
+
+        if(class_index == 5):
+            label_with_attri[52] = label[5]
+
+        if(class_index in [6, 7, 8, 9]):
+            for attr in minor_class:
+                # 第一个点
+                if(attr[0] == (class_index + 0.1) and attr[-1] == bbox_id):
+                    label_with_attri[53 + int(class_index - 6) * 8] = (attr[1] - label[1]) / box_w
+                    label_with_attri[54 + int(class_index - 6) * 8] = (attr[2] - label[2]) / box_h
+                # 第二个点
+                if(attr[0] == (class_index + 0.2) and attr[-1] == bbox_id):
+                    label_with_attri[55 + int(class_index - 6) * 8] = (attr[1] - label[1]) / box_w
+                    label_with_attri[56 + int(class_index - 6) * 8] = (attr[2] - label[2]) / box_h
+                # 第三个点
+                if(attr[0] == (class_index + 0.3) and attr[-1] == bbox_id):
+                    label_with_attri[57 + int(class_index - 6) * 8] = (attr[1] - label[1]) / box_w
+                    label_with_attri[58 + int(class_index - 6) * 8] = (attr[2] - label[2]) / box_h
+                # 第四个点
+                if(attr[0] == (class_index + 0.4) and attr[-1] == bbox_id):
+                    label_with_attri[59 + int(class_index - 6) * 8] = (attr[1] - label[1]) / box_w
+                    label_with_attri[60 + int(class_index - 6) * 8] = (attr[2] - label[2]) / box_h
+
+        labels_with_attri.append(label_with_attri)
+    
+    return np.array(labels_with_attri)
+
+
 def load_mosaic(self, index):
     # loads images in a 4-mosaic
 
     labels4, segments4 = [], []
     s = self.img_size
     yc, xc = [int(random.uniform(-x, 2 * s + x)) for x in self.mosaic_border]  # mosaic center x, y
-    indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
+
+    if(self.attribute_targets == 0):
+        indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
+    else:
+        indices = []
+        # 类别 6、7、8、9 因为有关键点数据，所以不允许出现在马赛克中
+        for index in random.choices(self.indices, k=self.n):
+            if (7 not in self.labels[index][:, 0]) and (8 not in self.labels[index][:, 0]) and (9 not in self.labels[index][:, 0]) and (6 not in self.labels[index][:, 0]):
+                indices.append(index)
+            if len(indices) == 4:
+                break
+
     for i, index in enumerate(indices):
         # Load image
         img, _, (h, w) = load_image(self, index)
@@ -742,19 +1051,27 @@ def load_mosaic(self, index):
         img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
         padw = x1a - x1b
         padh = y1a - y1b
-
+        
         # Labels
         labels, segments = self.labels[index].copy(), self.segments[index].copy()
         if labels.size:
-            labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padw, padh)  # normalized xywh to pixel xyxy format
+            if(self.attribute_targets != 0):
+                seperate_attri_labels = split_attributes_into_seperate_boxes(labels, 100 * (i + 1))
+                if(seperate_attri_labels.size != 0):
+                    seperate_attri_labels[:, 1:5] = xywhn2xyxy(seperate_attri_labels[:, 1:5], w, h, padw, padh)
+                labels = seperate_attri_labels
+            else:
+                labels[:, 1:5] = xywhn2xyxy(labels[:, 1:5], w, h, padw, padh)  # normalized xywh to pixel xyxy format
             segments = [xyn2xy(x, w, h, padw, padh) for x in segments]
-        labels4.append(labels)
+        if(labels.size != 0):
+            labels4.append(labels)
         segments4.extend(segments)
 
     # Concat/clip labels
     labels4 = np.concatenate(labels4, 0)
-    for x in (labels4[:, 1:], *segments4):
+    for x in (labels4[:, 1:5], *segments4):
         np.clip(x, 0, 2 * s, out=x)  # clip when using random_perspective()
+    
     # img4, labels4 = replicate(img4, labels4)  # replicate
 
     # Augment
@@ -767,7 +1084,11 @@ def load_mosaic(self, index):
                                        scale=self.hyp['scale'],
                                        shear=self.hyp['shear'],
                                        perspective=self.hyp['perspective'],
-                                       border=self.mosaic_border)  # border to remove
+                                       border=self.mosaic_border,
+                                       with_attributes=(self.attribute_targets != 0))  # border to remove
+
+    if(self.attribute_targets != 0):
+        labels4 = restore_seperate_boxes_into_attributes(labels4)
 
     return img4, labels4
 
@@ -777,7 +1098,18 @@ def load_mosaic9(self, index):
 
     labels9, segments9 = [], []
     s = self.img_size
-    indices = [index] + random.choices(self.indices, k=8)  # 8 additional image indices
+
+    if(self.attribute_targets == 0):
+        indices = [index] + random.choices(self.indices, k=8)  # 8 additional image indices
+    else:
+        indices = []
+        # 类别 6、7、8、9 因为有关键点数据，所以不允许出现在马赛克中
+        for index in random.choices(self.indices, k=self.n):
+            if (7 not in self.labels[index][:, 0]) and (8 not in self.labels[index][:, 0]) and (9 not in self.labels[index][:, 0]) and (6 not in self.labels[index][:, 0]):
+                indices.append(index)
+            if len(indices) == 9:
+                break
+
     for i, index in enumerate(indices):
         # Load image
         img, _, (h, w) = load_image(self, index)
@@ -810,9 +1142,16 @@ def load_mosaic9(self, index):
         # Labels
         labels, segments = self.labels[index].copy(), self.segments[index].copy()
         if labels.size:
-            labels[:, 1:] = xywhn2xyxy(labels[:, 1:], w, h, padx, pady)  # normalized xywh to pixel xyxy format
+            if(self.attribute_targets != 0):
+                seperate_attri_labels = split_attributes_into_seperate_boxes(labels, 100 * (i + 1))
+                if(seperate_attri_labels.size != 0):
+                    seperate_attri_labels[:, 1:5] = xywhn2xyxy(seperate_attri_labels[:, 1:5], w, h, padx, pady)
+                labels = seperate_attri_labels
+            else:
+                labels[:, 1:5] = xywhn2xyxy(labels[:, 1:5], w, h, padx, pady)  # normalized xywh to pixel xyxy format
             segments = [xyn2xy(x, w, h, padx, pady) for x in segments]
-        labels9.append(labels)
+        if(labels.size != 0):
+            labels9.append(labels)
         segments9.extend(segments)
 
         # Image
@@ -830,7 +1169,7 @@ def load_mosaic9(self, index):
     c = np.array([xc, yc])  # centers
     segments9 = [x - c for x in segments9]
 
-    for x in (labels9[:, 1:], *segments9):
+    for x in (labels9[:, 1:5], *segments9):
         np.clip(x, 0, 2 * s, out=x)  # clip when using random_perspective()
     # img9, labels9 = replicate(img9, labels9)  # replicate
 
@@ -843,7 +1182,11 @@ def load_mosaic9(self, index):
                                        scale=self.hyp['scale'],
                                        shear=self.hyp['shear'],
                                        perspective=self.hyp['perspective'],
-                                       border=self.mosaic_border)  # border to remove
+                                       border=self.mosaic_border,
+                                       with_attributes=(self.attribute_targets != 0))  # border to remove
+    
+    if(self.attribute_targets != 0):
+        labels9 = restore_seperate_boxes_into_attributes(labels9)
 
     return img9, labels9
 
@@ -999,6 +1342,7 @@ def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scale
     r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
     if not scaleup:  # only scale down, do not scale up (for better test mAP)
         r = min(r, 1.0)
+
     # Compute padding
     ratio = r, r  # width, height ratios
     new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
@@ -1018,12 +1362,13 @@ def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scale
         img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
     top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
     left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+
     img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
     return img, ratio, (dw, dh)
 
 
 def random_perspective(img, targets=(), segments=(), degrees=10, translate=.1, scale=.1, shear=10, perspective=0.0,
-                       border=(0, 0)):
+                       border=(0, 0), with_attributes=False):
     # torchvision.transforms.RandomAffine(degrees=(-10, 10), translate=(.1, .1), scale=(.9, 1.1), shear=(-10, 10))
     # targets = [cls, xyxy]
 
@@ -1044,7 +1389,7 @@ def random_perspective(img, targets=(), segments=(), degrees=10, translate=.1, s
     R = np.eye(3)
     a = random.uniform(-degrees, degrees)
     # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
-    s = random.uniform(1 - scale, 1.1 + scale)
+    s = random.uniform(1 - scale, 1.1 + scale) if not with_attributes else random.uniform(1 - scale, 1.0) # 带属性的是不能放大的
     # s = 2 ** random.uniform(-scale, scale)
     R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
 
@@ -1098,13 +1443,13 @@ def random_perspective(img, targets=(), segments=(), degrees=10, translate=.1, s
             x = xy[:, [0, 2, 4, 6]]
             y = xy[:, [1, 3, 5, 7]]
             new = np.concatenate((x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
-
             # clip
             new[:, [0, 2]] = new[:, [0, 2]].clip(0, width)
             new[:, [1, 3]] = new[:, [1, 3]].clip(0, height)
 
         # filter candidates
-        i = box_candidates(box1=targets[:, 1:5].T * s, box2=new.T, area_thr=0.01 if use_segments else 0.10)
+        # 筛选数据增强后的检测框的，area_thr 为面积比值，如果(增强后的面积 / 增强前的面积) > 0.25 才保留，否则丢弃
+        i = box_candidates(box1=targets[:, 1:5].T * s, box2=new.T, area_thr=0.025 if use_segments else 0.4)
         targets = targets[i]
         targets[:, 1:5] = new[i]
 
@@ -1217,7 +1562,7 @@ def pastein(image, labels, sample_labels, sample_images, sample_masks):
                     if len(labels):
                         labels = np.concatenate((labels, [[sample_labels[sel_ind], *box]]), 0)
                     else:
-                        labels = np.array([[sample_labels[sel_ind], *box]])
+                        labels = np.arraywith_attributes([[sample_labels[sel_ind], *box]])
                               
                     image[ymin:ymin+r_h, xmin:xmin+r_w] = temp_crop
 
