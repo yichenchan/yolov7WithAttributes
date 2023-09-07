@@ -111,7 +111,8 @@ def train(hyp, opt, device, tb_writer=None):
     
     # 获取训练数据路径
     train_path = data_dict['train']
-    test_path = data_dict['val']
+    val_path = data_dict['val']
+    test_path = data_dict['test']
 
     # 根据配置冻结若干层权重
     freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # parameter names to freeze (full or partial)
@@ -270,10 +271,10 @@ def train(hyp, opt, device, tb_writer=None):
     nb = len(dataloader)  # number of batches
     assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
 
-    # 只在第一块 gpu 上进行测试，创建测试集 dataloader
+    # 只在第一块 gpu 上进行验证，创建验证集 valloader
     if rank in [-1, 0]:
-        testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, attribute_targets, opt,  # testloader
-                                       hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
+        valloader = create_dataloader(val_path, imgsz_test, opt.test_batch_size, gs, attribute_targets, opt,  # valloader
+                                       hyp=hyp, cache=opt.cache_images and not opt.notest, rect=False, rank=-1,
                                        world_size=opt.world_size, workers=opt.workers,
                                        pad=0.5, prefix=colorstr('val: '))[0]
 
@@ -357,7 +358,8 @@ def train(hyp, opt, device, tb_writer=None):
         optimizer.zero_grad()
 
         # 遍历所有 batch，利用 pbar 记录
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        plot_batch_index = random.randint(0, nb) # 每个 epoch 随机从所有 batch 里面选一个进行 plot 可视化
+        for i, (imgs, targets, paths, shapes) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
@@ -411,10 +413,10 @@ def train(hyp, opt, device, tb_writer=None):
                     '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
 
-                # Plot
-                if plots and ni < 10:
-                    f = save_dir / f'train_batch{ni}.jpg'  # filename
-                    Thread(target=plot_images, args=(imgs, targets, paths, f), daemon=True).start()
+                # 训练数据集标签可视化
+                if plots and (i == plot_batch_index):
+                    f = save_dir / f'epoch{epoch}_train_batch{i}_labels.jpg'  # filename
+                    Thread(target=plot_images, args=(imgs, targets, shapes, paths, f, names, imgsz, 16, attribute_targets, False), daemon=True).start()
                     # if tb_writer:
                     #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
                     #     tb_writer.add_graph(torch.jit.trace(model, imgs, strict=False), [])  # add model graph
@@ -437,19 +439,21 @@ def train(hyp, opt, device, tb_writer=None):
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1
                 results, maps, times = test.test(data_dict,
-                                                 batch_size=batch_size * 2,
+                                                 batch_size=batch_size,
                                                  imgsz=imgsz_test,
                                                  model=ema.ema,
                                                  single_cls=opt.single_cls,
-                                                 dataloader=testloader,
+                                                 dataloader=valloader,
                                                  save_dir=save_dir,
                                                  verbose=nc < 50 and final_epoch,
-                                                 plots=plots and final_epoch,
+                                                 #plots=plots and final_epoch,
+                                                 plots=plots,
                                                  wandb_logger=wandb_logger,
                                                  compute_loss=compute_loss,
                                                  is_coco=is_coco,
                                                  v5_metric=opt.v5_metric,
-                                                 attribute_outputs=attribute_outputs)
+                                                 plot_in_original_size=True
+                                                 )
 
             # Write
             with open(results_file, 'a') as f:
@@ -508,6 +512,11 @@ def train(hyp, opt, device, tb_writer=None):
     # 结束训练后的测试阶段，只在第一块 gpu 上面测试
     # end training
     if rank in [-1, 0]:
+        testloader = create_dataloader(test_path, imgsz_test, opt.test_batch_size, gs, attribute_targets, opt,  # valloader
+                                       hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
+                                       world_size=opt.world_size, workers=opt.workers,
+                                       pad=0.5, prefix=colorstr('test: '))[0]
+
         # Plots
         if plots:
             plot_results(save_dir=save_dir)  # save as results.png
@@ -520,7 +529,7 @@ def train(hyp, opt, device, tb_writer=None):
         if opt.data.endswith('coco.yaml') and nc == 80:  # if COCO
             for m in (last, best) if best.exists() else (last):  # speed, mAP tests
                 results, _, _ = test.test(opt.data,
-                                          batch_size=batch_size * 2,
+                                          batch_size=batch_size,
                                           imgsz=imgsz_test,
                                           conf_thres=0.001,
                                           iou_thres=0.7,
@@ -529,10 +538,10 @@ def train(hyp, opt, device, tb_writer=None):
                                           dataloader=testloader,
                                           save_dir=save_dir,
                                           save_json=True,
-                                          plots=False,
+                                          plots=True,
                                           is_coco=is_coco,
                                           v5_metric=opt.v5_metric,
-                                          attribute_outputs=attribute_outputs)
+                                          plot_in_original_size=True)
 
         # Strip optimizers
         final = best if best.exists() else last  # final model
@@ -562,6 +571,7 @@ if __name__ == '__main__':
     parser.add_argument('--hyp', type=str, default='data/hyp.scratch.p5.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=300)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
+    parser.add_argument('--test-batch-size', type=int, default=1, help='batch size for testing')
     parser.add_argument('--img-size', nargs='+', type=int, default=[640, 640], help='[train, test] image sizes')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', nargs='?', const=True, default=False, help='resume most recent training')
