@@ -30,7 +30,7 @@ for line in lines:
         image_not_exists_num += 1
         print(line.strip()[:-3] + 'jpg not exists')
     else:
-        with open(line.strip(), 'r') as label_file:
+        with open(line.strip(), 'r', encoding='utf-8') as label_file:
             boxes = label_file.readlines()
             wrong_box_found = False
             for box in boxes:
