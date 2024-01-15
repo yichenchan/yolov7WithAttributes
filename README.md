@@ -23,10 +23,10 @@
 - 行人：人头时候可见、骑的摩托车时候可见
 
 对于普通的 yolo 算法来说，一般输出的是如下图所示的向量
-![](./docs/normal_yolo_outputs.png)
+![](./figs/normal_yolo_outputs.png)
 
 为了能够预测bbox的属性，在一个 anchor 的输出后面按照如下顺序附上代表所有属性的值，如下图所示，把输出的所有跟属性相关的值的总个数填入 data/chezai-dataset-withAttri.yaml 中的 attribute_outputs 下
-![](./docs/yolov7_with_attributions.png)
+![](./figs/yolov7_with_attributions.png)
 
 由于不同的类别属性也不同，而且需要确保不可见的属性无法贡献该属性的 loss 的计算，所以我们需要如下所示的控制流进行控制不同的类别以及不同的可见性对最终的 loss 的影响
 
@@ -299,7 +299,11 @@ python train.py --prune_finetune --weights ./chezai_box_with_attr/train/exp3/wei
 ```
 
 ## 结果展示
-![](./docs/test_result.jpg)
+![](./figs/test_result1.jpg)
+![](./figs/test_result2.jpg)
+![](./figs/test_result3.jpg)
+![](./figs/test_result_mosaic.jpg)
+
 图中的标签含义为：
 - viehcle: 车辆类型(conf) | 左车灯可见 conf | 左车灯亮灭状态(conf) | 右车灯可见 conf | 右车灯亮灭状态(conf) | 车尾可见 conf | 车头可见 conf | 车牌可见 conf
 - person: 行人类型(conf) | 行人状态(conf) | 头盔状态(conf) | 行人头部可见 conf | 行人的车可见 conf | 骑的车的车牌的可见 conf
