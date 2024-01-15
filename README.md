@@ -172,29 +172,27 @@ dataset_path 的目录结构为：
 [cls_index(1), x(2), y(3), w(4), h(5), 车辆类别（6），左车灯是否可见（7），左车灯状态（8），左车灯位置（9~12），右车灯是否可见（13），右车灯状态（14），右车灯位置（15~18），车尾是否可见（19），车尾框位置（20~23），车头是否可见（24），车头框位置（25~28），车牌是否可见（29），车牌位置（30~33），人的类别（34），人的状态（35）， 是否带头盔（36），人头是否可见（37），人头的位置（38~41），人骑的车是否可见（42），人骑的车的位置（43~46），电动车车牌是否可见（47），车牌的位置（48~51），红绿灯的颜色（52），路牌的颜色（53），公交车道四个点（54～61），斑马线四个点（62～69），网格线四个点（70～77），导流线四个点（78～85）]
 ```
 
-“位置”的四个值指的是：
-- (attributeBox.x - bbox.x) / bbox.w
-- (attributeBox.y - bbox.y) / bbox.h
-- attributeBox.w / bbox.w
-- attributeBox.h / bbox.h
-
-“四个点”的八个值指的是：
-- keyPoint1.x / bbox.w
-- keyPoint1.y / bbox.h
-- keyPoint2.x / bbox.w
-- keyPoint2.y / bbox.h
-- keyPoint3.x / bbox.w
-- keyPoint3.y / bbox.h
-- keyPoint4.x / bbox.w
-- keyPoint4.y / bbox.h
-
-是否可见：不可见（0），可见（1）
-车灯状态：不可见（-1），不亮（0），亮（1）
-车辆类别：轿车（0），公交（1），货车（2）
-人的类别：普通人（0），交警（1）
-是否戴头盔：不带（0），带（1）
-红绿灯颜色：绿色（0），红色（1），黄色（2）
-路牌颜色：蓝色（0），绿色（1）
+- “位置”的四个值指的是：
+  - (attributeBox.x - bbox.x) / bbox.w
+  - (attributeBox.y - bbox.y) / bbox.h
+  - attributeBox.w / bbox.w
+  - attributeBox.h / bbox.h
+- “四个点”的八个值指的是：
+  - keyPoint1.x / bbox.w
+  - keyPoint1.y / bbox.h
+  - keyPoint2.x / bbox.w
+  - keyPoint2.y / bbox.h
+  - keyPoint3.x / bbox.w
+  - keyPoint3.y / bbox.h
+  - keyPoint4.x / bbox.w
+  - keyPoint4.y / bbox.h
+- 是否可见：不可见（0），可见（1）
+- 车灯状态：不可见（-1），不亮（0），亮（1）
+- 车辆类别：轿车（0），公交（1），货车（2）
+- 人的类别：普通人（0），交警（1）
+- 是否戴头盔：不带（0），带（1）
+- 红绿灯颜色：绿色（0），红色（1），黄色（2）
+- 路牌颜色：蓝色（0），绿色（1）
 
 一个 img1.txt 的结构如下：
 ```txt
